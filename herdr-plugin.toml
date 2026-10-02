@@ -1,0 +1,26 @@
+id = "local.jira"
+name = "Jira"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Start a Jira ticket in a worktree of the focused repository"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["npm", "ci", "--ignore-scripts"]
+
+[[build]]
+command = ["npm", "run", "build"]
+
+[[actions]]
+id = "start"
+title = "Start Jira ticket"
+contexts = ["workspace"]
+command = ["node", "dist/action.js"]
+
+[[panes]]
+id = "form"
+title = "Start Jira ticket"
+placement = "popup"
+width = 72
+height = 18
+command = ["node", "dist/form.js"]

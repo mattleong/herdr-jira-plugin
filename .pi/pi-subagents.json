@@ -1,0 +1,89 @@
+{
+  "version": 6,
+  "profileSets": {
+    "sol-6.1": {
+      "profiles": {
+        "scout": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6-luna",
+            "effort": "high",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "openaiFastMode": true,
+            "closeOnReport": true
+          }
+        ],
+        "researcher": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6-luna",
+            "effort": "high",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "openaiFastMode": true,
+            "closeOnReport": true
+          }
+        ],
+        "planner": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6.1-sol",
+            "effort": "xhigh",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "closeOnReport": true
+          }
+        ],
+        "worker": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6.1-sol",
+            "effort": "xhigh",
+            "context": "fresh",
+            "writeIntent": "writer",
+            "closeOnReport": true
+          }
+        ],
+        "reviewer": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6.1-sol",
+            "effort": "xhigh",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "closeOnReport": true
+          }
+        ],
+        "oracle": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6.1-sol",
+            "effort": "xhigh",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "closeOnReport": true
+          }
+        ],
+        "generalist": [
+          {
+            "host": "local",
+            "runtime": "pi",
+            "model": "openai-codex/gpt-6.1-sol",
+            "effort": "xhigh",
+            "context": "fresh",
+            "writeIntent": "read-only",
+            "closeOnReport": true
+          }
+        ]
+      }
+    }
+  },
+  "defaultProfileSet": "sol-6.1"
+}

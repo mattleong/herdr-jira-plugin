@@ -1,0 +1,25 @@
+{
+  "name": "herdr-jira-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Start Jira work in a Herdr worktree with an interactive coding harness",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "tsx --test tests/*.test.ts",
+    "preview": "node dist/form.js --preview",
+    "link": "npm run build && herdr plugin link ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "string-width": "^7.2.0"
+  }
+}
