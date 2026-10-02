@@ -5,7 +5,7 @@ Press **Ctrl+B, then J**, paste a Jira key or browse URL, optionally edit **Bran
 - Fetches the remote default branch's latest commit without changing your current checkout.
 - Defaults the branch to the normalized ticket ID, e.g. `MAIL-1234`; you can edit it before launch.
 - Validates ticket/branch syntax as you type and enables Start only when both are valid.
-- Shows the resolved base and five phases: fetch **1/5**, worktree **2/5**, dependencies **3/5**, Pi startup **4/5**, instructions **5/5**.
+- Shows the resolved base and five phases: fetch **1/5**, worktree **2/5**, dependencies **3/5**, Pi startup **4/5**, instructions **5/5**, with total elapsed time in the existing status area.
 - Automatically prepares unambiguous JavaScript, Python, or Go dependencies before Pi starts, including JS/Python development dependencies.
 - Starts an interactive Pi session and asks it to read Jira through your existing MCP integration before coding.
 - Reopens a previously dispatched ticket workspace rather than creating duplicates or repeating prompts.
@@ -72,7 +72,7 @@ The compact 64 × 13 popup shows the repository, a labeled ticket field, an edit
 - **Ctrl+O after a partial-launch error:** close the popup and open the preserved workspace to handle Pi's login/trust/approval UI. Invalid checkout/pane identity or unverified Python environment binding cannot be bypassed with Ctrl+S.
 - After resolving a startup screen, invoke the action again with the same ticket and choose **Resume launch**. It verifies the existing Pi before continuing; it does not blindly repeat a start or prompt.
 
-Error details preserve captured stdout/stderr (within the subprocess output limit), strip terminal controls, and redact URL credentials and common credential query parameters. Review diagnostics before sharing; arbitrary secret formats cannot all be detected. Copying is explicit, using `pbcopy` on macOS, `wl-copy` on Wayland, or `xclip` on X11; install the applicable utility on Linux. Clipboard failures leave the original details available for inspection.
+Setup errors show a short, sanitized cause directly in the form, including when reopening a failed attempt. Error details preserve captured stdout/stderr (within the subprocess output limit), strip terminal controls, and redact URL credentials and common credential query parameters. Review diagnostics before sharing; arbitrary secret formats cannot all be detected. Copying is explicit, using `pbcopy` on macOS, `wl-copy` on Wayland, or `xclip` on X11; install the applicable utility on Linux. Clipboard failures leave the original details available for inspection.
 
 Cancellation is disabled while a launch operation is in progress, because interruption can leave an uncertain Git/Herdr mutation. Commands have bounded timeouts. Normal terminal exit/signals abort the owned installer; a forced kill can still leave installer child processes and state/locks behind. Inspect the recorded PID **and installer children** before removing a lock or retrying. Locks are never stolen automatically.
 
@@ -156,7 +156,7 @@ No arbitrary hook-command configuration is accepted. Runtime/package-manager dec
 
 **Security:** dependency installation may run repository/package lifecycle scripts and Python build backends automatically, before Pi's ticket prompt. Only launch trusted repositories. Installs run with your user permissions, network access, and applicable inherited registry/auth settings; a worktree is not a sandbox, and plugin restrictions cannot constrain malicious install scripts. The plugin does not install missing runtimes/managers, but repository scripts remain arbitrary code.
 
-Each attempt has a unique mode-0600 log under `HERDR_PLUGIN_STATE_DIR`, with bounded output (2 MiB) and URL/common credential redaction. Ctrl+D includes full captured diagnostics and the log path. Logs may still contain secrets that redaction cannot recognize: inspect before sharing. Installer output is never copied into the Pi prompt.
+Each attempt has a unique mode-0600 log under `HERDR_PLUGIN_STATE_DIR`, with bounded output (2 MiB) and URL/common credential redaction. Space is reserved for the final failure reason and bounded diagnostics, and omitted output is marked explicitly. Incomplete records cut by output limits are omitted rather than exposing credential fragments. Ctrl+D includes full captured diagnostics and the log path. Logs may still contain secrets that redaction cannot recognize: inspect before sharing. Installer output is never copied into the Pi prompt.
 
 ## Safety and recovery
 

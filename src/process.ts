@@ -15,8 +15,11 @@ export const run: Run = (binary, args, options = {}) => new Promise((resolve, re
     cwd: options.cwd, env: options.env ?? process.env,
     stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
   });
-  let stdout = "", stderr = "", size = 0;
-  const diagnostics = () => [stderr && `stderr:\n${diagnosticText(stderr)}`, stdout && `stdout:\n${diagnosticText(stdout)}`].filter(Boolean).join("\n\n");
+  let stdout = "", stderr = "", size = 0, outputTruncated = false;
+  // Once the limit cuts a stream, its last record may contain an incomplete URL
+  // credential or escape sequence. Omit it rather than sanitizing a raw fragment.
+  const captured = (text: string) => diagnosticText(outputTruncated ? text.slice(0, text.lastIndexOf("\n") + 1) : text);
+  const diagnostics = () => [stderr && `stderr:\n${captured(stderr)}`, stdout && `stdout:\n${captured(stdout)}`, outputTruncated && "[Output truncated at the subprocess limit; incomplete records and further output omitted.]"].filter(Boolean).join("\n\n");
   let failure: string | undefined;
   let settled = false;
   let escalation: NodeJS.Timeout | undefined;
@@ -60,14 +63,16 @@ export const run: Run = (binary, args, options = {}) => new Promise((resolve, re
   deadline = setTimeout(() => terminate("timed out"), options.timeout ?? 30_000);
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
   child.stdout.on("data", (text: string) => {
+    if (outputTruncated) return;
     size += Buffer.byteLength(text);
-    if (size > 2 * 1024 * 1024) return terminate("exceeded the output limit");
+    if (size > 2 * 1024 * 1024) { outputTruncated = true; return terminate("exceeded the output limit"); }
     stdout += text;
     try { options.onOutput?.(text, "stdout"); } catch { terminate("output observer failed"); }
   });
   child.stderr.on("data", (text: string) => {
+    if (outputTruncated) return;
     size += Buffer.byteLength(text);
-    if (size > 2 * 1024 * 1024) return terminate("exceeded the output limit");
+    if (size > 2 * 1024 * 1024) { outputTruncated = true; return terminate("exceeded the output limit"); }
     stderr += text;
     try { options.onOutput?.(text, "stderr"); } catch { terminate("output observer failed"); }
   });

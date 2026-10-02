@@ -6,7 +6,7 @@ import { errorView } from "./error-view.js";
 export { initialModel, update, validateForm, type FormModel, type Key, type FormEffect } from "./form-model.js";
 
 export interface RenderOptions {
-  height?: number; color?: boolean; status?: string; base?: string; busy?: boolean; canOpen?: boolean;
+  height?: number; color?: boolean; status?: string; base?: string; busy?: boolean; elapsedSeconds?: number; canOpen?: boolean;
 }
 export interface FormFrame {
   text: string; cursor?: { row: number; column: number }; tooSmall: boolean; detailsOffset?: number;
@@ -67,6 +67,13 @@ export function renderFrame(model: FormModel, repository: string, width: number,
     : validation.ticket && validation.branchError ? "Branch: " + validation.branchError : "";
   const feedback = options.status ?? (model.error || (model.checkingSavedBranch ? "Checking saved ticket branch…" : validationMessage || (validation.ticket ? `Ready · ${validation.ticket.key}` : "Paste a ticket to begin.")));
   const feedbackLines = wrap(feedback, content, Math.min(2, height - lines.length - 1));
+  if (options.busy && options.status && Number.isFinite(options.elapsedSeconds) && feedbackLines.length) {
+    const seconds = Math.max(0, Math.floor(options.elapsedSeconds!));
+    const suffix = ` · ${seconds}s`;
+    // Keep the clock visible even when a long status fills both available rows.
+    const last = feedbackLines.length - 1;
+    feedbackLines[last] = clip(feedbackLines[last]!, content - cells(suffix)) + suffix;
+  }
   const feedbackError = !options.status && !!(model.error || validationMessage);
   for (const line of feedbackLines) row(feedbackError ? paint(line, "38;5;203") : muted(line));
   const hint = options.busy ? "Please wait — preparing your workspace."

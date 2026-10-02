@@ -297,6 +297,49 @@ test("failed installer output and successful probe stderr survive in the sanitiz
 test("per-attempt logs are bounded even for an injected executor", async t => {
   const f = await fixture(t, packageFiles()), runner = fake({}, call => { if (call.args[0] === "ci") call.options.onOutput?.("x".repeat(4 * 1024 * 1024), "stderr"); }), request = f.request();
   await runner.installer.prepare(request); assert.ok((await lstat(request.logPath)).size <= 2 * 1024 * 1024);
+  assert.match(await readFile(request.logPath, "utf8"), /Diagnostics truncated/);
+});
+test("noisy output cannot consume the final failure reason or stderr", async t => {
+  const f = await fixture(t, packageFiles()), request = f.request();
+  const runner = fake({}, call => {
+    if (call.args[0] !== "ci") return;
+    call.options.onOutput?.("build noise\n".repeat(300_000), "stdout");
+    call.options.onOutput?.("LAST FAILURE TAIL\n", "stderr");
+    throw new Error("FINAL FAILURE REASON");
+  });
+  await assert.rejects(runner.installer.prepare(request), /FINAL FAILURE REASON/);
+  const log = await readFile(request.logPath, "utf8");
+  assert.ok(Buffer.byteLength(log) <= 2 * 1024 * 1024);
+  assert.match(log, /Diagnostics truncated/); assert.match(log, /Setup failed:.*FINAL FAILURE REASON/); assert.match(log, /LAST FAILURE TAIL/);
+  assert.equal((await lstat(request.logPath)).mode & 0o777, 0o600);
+});
+test("a reserved footer survives earlier noisy commands and keeps bounded UTF-8 failure details", async t => {
+  const f = await fixture(t, packageFiles()), request = f.request();
+  const runner = fake({}, call => {
+    if (call.args[0] === "--version") call.options.onOutput?.("漢😀 probe noise\n".repeat(100_000), "stderr");
+    if (call.args[0] === "ci") {
+      call.options.onOutput?.("LATE STDERR\n", "stderr");
+      throw new WorkflowError("DISTINCT FAILURE", false, "FIRST DETAIL\n" + "漢😀 detail\n".repeat(15_000) + "LAST DETAIL");
+    }
+  });
+  await assert.rejects(runner.installer.prepare(request), /DISTINCT FAILURE/);
+  const log = await readFile(request.logPath, "utf8");
+  assert.ok(Buffer.byteLength(log) <= 2 * 1024 * 1024); assert.doesNotMatch(log, /\ufffd/);
+  for (const text of ["Diagnostics truncated", "Setup failed:", "DISTINCT FAILURE", "FIRST DETAIL", "LAST DETAIL", "LATE STDERR"]) assert.ok(log.includes(text), text);
+});
+test("split credentials and raw records crossing capture limits cannot leak fragments", async t => {
+  const f = await fixture(t, packageFiles()), request = f.request();
+  const runner = fake({}, call => {
+    if (call.args[0] !== "ci") return;
+    for (const chunk of ["\x1b[", "31mhttps://user:", "CHUNK_SECRET@host.test/?token=", "QUERY_SECRET\x1b[0m\nAuthoriza", "tion:\n Be", "arer HEADER_SECRET\n"]) call.options.onOutput?.(chunk, "stderr");
+    call.options.onOutput?.("safe record\nhttps://user:BOUNDARY_SECRET" + "x".repeat(2 * 1024 * 1024), "stdout");
+    call.options.onOutput?.("@host.test\n", "stdout");
+    throw new Error("Known failure");
+  });
+  await assert.rejects(runner.installer.prepare(request));
+  const log = await readFile(request.logPath, "utf8");
+  assert.match(log, /safe record/); assert.match(log, /Diagnostics truncated/); assert.match(log, /redacted/);
+  assert.doesNotMatch(log, /CHUNK_SECRET|QUERY_SECRET|HEADER_SECRET|BOUNDARY_SECRET|\x1b/);
 });
 test("all commands share one total deadline and late fake success cannot claim success", async t => {
   const f = await fixture(t, packageFiles()), runner = fake({}, async call => { if (call.args[0] === "--version") await delay(40); });

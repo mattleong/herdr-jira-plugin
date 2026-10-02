@@ -44,6 +44,14 @@ test("output is bounded and an observer failure terminates the command", async (
     onOutput: () => { throw new Error("observer"); },
   }), /observer failed/);
 });
+test("output-limit errors identify omitted data and drop incomplete credential records", async () => {
+  const script = "process.stdout.write('SAFE RECORD\\nhttps://user:OVERFLOW_SECRET' + 'x'.repeat(3 * 1024 * 1024) + '@host.test\\n')";
+  await assert.rejects(run(process.execPath, ["-e", script], { timeout: 5000 }), error => {
+    assert.match(messageOf(error), /output limit/);
+    assert.match(detailsOf(error), /SAFE RECORD/); assert.match(detailsOf(error), /Output truncated/);
+    assert.doesNotMatch(detailsOf(error), /OVERFLOW_SECRET/); return true;
+  });
+});
 test("timeout diagnostics preserve output produced during termination", async () => {
   await assert.rejects(run(process.execPath, ["-e", "process.on('SIGTERM', () => { process.stderr.write('TERM DIAGNOSTIC'); process.exit(0); }); setInterval(() => {}, 1000)"], { timeout: 200 }), error => {
     assert.match(detailsOf(error), /TERM DIAGNOSTIC/); return true;

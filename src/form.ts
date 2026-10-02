@@ -11,6 +11,7 @@ import { parseOrigin } from "./origin.js";
 import { Git } from "./repository.js";
 import { State } from "./state.js";
 import { terminalScreen } from "./display.js";
+import { startElapsed } from "./elapsed.js";
 import { initialModel, InputDecoder, renderFrame, update, validateForm, type Key } from "./ui.js";
 
 async function main(): Promise<void> {
@@ -22,6 +23,7 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 }
 const model = initialModel();
 let busy = false;
+let elapsed: ReturnType<typeof startElapsed> | undefined;
 let status: string | undefined;
 let base: string | undefined;
 let copying = false;
@@ -46,16 +48,18 @@ function draw(): void {
   const frame = renderFrame(model, origin?.repo.checkout ?? "/example/repository (preview only)", process.stdout.columns ?? 80, {
     height: process.stdout.rows ?? 24,
     color,
-    status, base, busy, canOpen: !!existing,
+    status, base, busy, elapsedSeconds: elapsed?.seconds(), canOpen: !!existing,
   });
   tooSmall = frame.tooSmall;
   if (frame.detailsOffset !== undefined) model.detailsOffset = frame.detailsOffset;
   process.stdout.write(terminalScreen(frame.text, color));
   if (frame.cursor) process.stdout.write(`\x1b[${frame.cursor.row};${frame.cursor.column}H\x1b[?25h`);
 }
+function stopElapsed(): void { elapsed?.stop(); elapsed = undefined; }
 function cleanup(): void {
   if (cleaned) return;
   cleaned = true;
+  stopElapsed();
   clipboardController?.abort(); // Synchronously kill an unacknowledged copy before process.exit drops timers.
   launchController?.abort(); // Kill the currently owned installer on terminal exit/signals.
   clearTimeout(escapeTimer);
@@ -79,6 +83,7 @@ async function submit(skipSetup = false): Promise<void> {
   const ticket = validation.ticket;
   if (preview) { status = `Preview only: ${ticket.key} · Branch: ${model.branch} · Pi. Nothing launched.`; draw(); return; }
   busy = true; // Synchronous admission: repeated Enter/Ctrl+S cannot start concurrent launches.
+  elapsed = startElapsed(() => { if (!cleaned && busy) draw(); });
   const setupAction = skipSetup ? "skip" : model.setupRecovery ? "retry" : undefined;
   const recover = model.recover;
   launchController = new AbortController();
@@ -92,6 +97,7 @@ async function submit(skipSetup = false): Promise<void> {
     });
     finish(result);
   } catch (error) {
+    stopElapsed();
     status = undefined; model.error = messageOf(error); model.errorDetails = detailsOf(error);
     model.recover = error instanceof WorkflowError && error.recoverable;
     model.setupRecovery = error instanceof SetupError;

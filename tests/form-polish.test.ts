@@ -7,7 +7,7 @@ import { lookupSavedBranch, cancelSavedBranchLookup } from "../src/saved-branch.
 import { cells, inputViewport } from "../src/display.js";
 import { detailLines } from "../src/error-view.js";
 import { copyErrorDetails } from "../src/clipboard.js";
-import { WorkflowError, SetupError, detailsOf } from "../src/errors.js";
+import { WorkflowError, SetupError, detailsOf, setupFailureMessage } from "../src/errors.js";
 import type { RecordState } from "../src/state.js";
 
 test("manifest declares the compact 64 by 13 popup", async () => {
@@ -102,6 +102,37 @@ test("details and progress remain bounded and color-equivalent at minimum size",
     for (const line of plain.text.split("\r\n")) assert.ok(cells(line) < 44);
     if (busy) { assert.match(plain.text, /Base +origin\/trunk/); assert.match(plain.text, /3\/4 Starting Pi/); assert.equal(plain.cursor, undefined); }
   }
+});
+test("elapsed time stays visible in existing feedback rows without changing idle/errors or controls", () => {
+  const model = initialModel(); update(model, { kind: "paste", text: "MAIL-1" });
+  for (const width of [44, 62]) for (const status of ["3/5 Installing dependencies…", "3/5 Installing " + "漢字👩‍💻".repeat(80)]) {
+    for (const seconds of [0, 42, 300, 1800]) {
+      const options = { height: 11, busy: true, status, elapsedSeconds: seconds };
+      const frame = renderFrame(model, "/repo", width, options);
+      assert.match(frame.text, new RegExp(` · ${seconds}s`));
+      assert.ok(frame.text.split("\r\n").length <= 11);
+      for (const line of frame.text.split("\r\n")) assert.ok(cells(line) < width);
+      assert.equal(stripVTControlCharacters(renderFrame(model, "/repo", width, { ...options, color: true }).text), frame.text);
+      assert.doesNotMatch(frame.text, /Ctrl\+S|Retry setup/);
+    }
+  }
+  model.error = "Python version mismatch";
+  assert.equal(renderFrame(model, "/repo", 44, { elapsedSeconds: 42 }).text, renderFrame(model, "/repo", 44).text);
+  model.detailsOpen = true; model.errorDetails = "Full diagnostic";
+  assert.equal(renderFrame(model, "/repo", 44, { elapsedSeconds: 42 }).text, renderFrame(model, "/repo", 44).text);
+});
+test("setup cause is short, sanitized and visible with existing recovery controls", () => {
+  const cause = "Python >=3.12 required; found 3.11.";
+  const model = initialModel(); update(model, { kind: "paste", text: "MAIL-1" });
+  model.error = setupFailureMessage(new Error(`\x1b[31m${cause}\x1b[0m\nLong installer diagnostic`)); model.setupRecovery = true;
+  assert.equal(model.error, cause);
+  const frame = renderFrame(model, "/repo", 44, { height: 11, canOpen: true });
+  assert.ok(frame.text.includes(cause)); assert.match(frame.text, /Retry setup/); assert.match(frame.text, /Ctrl\+S Start Pi anyway/);
+  assert.match(frame.text, /Ctrl\+O open · Ctrl\+D more/);
+  const secret = setupFailureMessage(new Error("https://user:secret@host.test/?token=hidden Authorization: Bearer private"));
+  assert.doesNotMatch(secret, /secret|hidden|private/); assert.match(secret, /redacted/);
+  assert.ok(Array.from(setupFailureMessage(new Error("漢😀".repeat(400)))).length <= 240);
+  assert.equal(setupFailureMessage(new Error("\n\t")), "Dependency setup failed; see details.");
 });
 test("setup recovery has a separate explicit skip action, compact row and busy/details gating", () => {
   const model = initialModel(); update(model, { kind: "paste", text: "MAIL-1" });

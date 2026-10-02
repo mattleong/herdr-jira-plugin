@@ -293,6 +293,22 @@ test("setup is write-ahead journaled, receives overrides/signal, and fails befor
   assert.equal((await stat(record.setup!.logPath!)).mode & 0o777, 0o600);
   assert.equal(f.calls.includes("start"), false); assert.equal(f.calls.includes("prompt"), false);
 });
+test("fresh and reopened setup failures show the sanitized cause while preserving full diagnostics", async t => {
+  const f = await setup(t);
+  const cause = "Python >=3.12 required; found 3.11.";
+  f.deps.prepare = async () => { f.calls.push("prepare"); throw new WorkflowError(`\x1b[31m${cause}\x1b[0m\nAuthorization: Bearer PRIVATE_TEST_TOKEN`, false, "Detailed diagnosis\nFINAL DETAIL"); };
+  await assert.rejects(launch(f.request, f.deps), error => {
+    assert.ok(error instanceof SetupError); assert.equal(error.message, cause);
+    assert.match(detailsOf(error), /FINAL DETAIL/); assert.doesNotMatch(detailsOf(error), /PRIVATE_TEST_TOKEN/); return true;
+  });
+  const saved = (await f.state.load(f.state.key(f.commonDir, f.request.ticket)))!;
+  assert.equal(saved.setup?.summary, cause);
+  await assert.rejects(launch(f.request, f.deps), error => {
+    assert.ok(error instanceof SetupError); assert.equal(error.message, cause); return true;
+  });
+  assert.equal(f.calls.filter(call => call === "prepare").length, 1);
+  assert.equal(f.calls.includes("start"), false); assert.equal(f.calls.includes("prompt"), false);
+});
 test("generic resume cannot retry failed setup; explicit retry reruns only setup with a fresh log", async t => {
   const f = await setup(t), { record } = await failSetup(f);
   await assert.rejects(launch({ ...f.request, recover: true }, f.deps), SetupError);

@@ -2,7 +2,7 @@ import { access, realpath, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { Config } from "./config.js";
-import { WorkflowError, SetupError, detailsOf, safeText } from "./errors.js";
+import { WorkflowError, SetupError, detailsOf, safeText, setupFailureMessage } from "./errors.js";
 import { validateBranch } from "./branch.js";
 import { getHarness } from "./harnesses.js";
 import type { Herdr, Agent } from "./herdr.js";
@@ -148,7 +148,7 @@ export async function launch(request: LaunchRequest, deps: Dependencies): Promis
         record.setup = { status: "failed", summary: "Setup was interrupted; inspect any remaining installer processes before retrying.", logPath: record.setup!.logPath };
         await state.save(key, record);
       }
-      await setupFailure("Dependency setup is incomplete. Retry setup, open the workspace, or explicitly Start Pi anyway.", record.setup!.summary);
+      await setupFailure(setupFailureMessage(record.setup!.summary ?? "Dependency setup is incomplete; see details."), record.setup!.summary);
     }
     if (resuming && !request.recover && !request.setupAction) throw new WorkflowError("The previous launch stopped before dispatch. Press Resume launch to inspect and continue it without creating another worktree.", true);
     if (record.phase === "created") {
@@ -171,9 +171,10 @@ export async function launch(request: LaunchRequest, deps: Dependencies): Promis
             logPath, signal: deps.signal, progress: text => progress(`3/5 ${safeText(text)}`),
           });
         } catch (error) {
-          record.setup = { status: "failed", stage: "dependencies", summary: "Dependency setup failed; inspect the private setup log for diagnostics.", logPath };
+          const summary = setupFailureMessage(error);
+          record.setup = { status: "failed", stage: "dependencies", summary, logPath };
           await state.save(key, record);
-          await setupFailure("Dependency setup failed. Retry setup or explicitly Start Pi anyway.", detailsOf(error));
+          await setupFailure(summary, detailsOf(error));
         }
         pane = await validateIdentity();
         let binding: EnvironmentBinding | undefined;

@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve, delimiter, dirname } from "node:pa
 import { devNull, homedir, tmpdir } from "node:os";
 import { parse as parseToml } from "smol-toml";
 import * as semver from "semver";
-import { WorkflowError, detailsOf, diagnosticText, safeText } from "./errors.js";
+import { WorkflowError, detailsOf, diagnosticText, safeText, messageOf } from "./errors.js";
 import { run, type Run } from "./process.js";
 import { setupManagers, type SetupManager, type SetupRequest, type SetupResult } from "./setup-types.js";
 
@@ -21,9 +21,23 @@ const at = (value: unknown, ...keys: string[]): unknown => keys.reduce<unknown>(
 const nonempty = (value: unknown): boolean => Array.isArray(value) ? value.length > 0 : Object.keys(object(value)).length > 0;
 const inside = (root: string, path: string): boolean => { const rel = relative(root, path); return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)); };
 function fail(message: string): never { throw new WorkflowError(message); }
-function sanitize(value: string): string {
-  return diagnosticText(value).replace(/((?:authorization|password|_authToken|api[_-]?key|access[_-]?token)\s*[:=]\s*)(?:Bearer\s+|Basic\s+)?[^\s]+/gi, "$1[redacted]");
+const truncation = "\n[Diagnostics truncated; some output omitted.]\n";
+const footerBudget = 64 * 1024;
+function utf8Prefix(bytes: Buffer, limit: number): Buffer {
+  let end = Math.min(bytes.length, Math.max(0, limit));
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end);
 }
+function fitDiagnostics(value: string, limit: number): Buffer {
+  // Redact before cutting: arbitrary suffixes must not expose credential fragments.
+  const bytes = Buffer.from(diagnosticText(value));
+  if (bytes.length <= limit) return bytes;
+  const marker = Buffer.from(truncation), budget = Math.floor((limit - marker.length) / 2);
+  let start = bytes.length - budget;
+  while ((bytes[start]! & 0xc0) === 0x80) start++;
+  return Buffer.concat([utf8Prefix(bytes, budget), marker, bytes.subarray(start)]);
+}
+const completeRecords = (text: string) => text.slice(0, text.lastIndexOf("\n") + 1);
 function numericVersion(text: string, label: string): string {
   const match = text.trim().match(/^v?(\d+(?:\.\d+){0,2})$/);
   if (!match) fail(`${label} must specify a numeric installed version; aliases and downloads are not supported.`);
@@ -74,11 +88,14 @@ export class DependenciesInstaller {
     if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) fail("Dependency setup timeout must be positive.");
     // Exclusive/no-follow is intentional: retries must allocate a fresh private log.
     const log = await open(request.logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    let written = 0;
+    let written = 0, truncated = false, failureOutput = "";
+    let failureFooter: Buffer | undefined;
     const append = async (text: string): Promise<void> => {
-      if (written >= maxLog) return;
-      const bytes = Buffer.from(sanitize(text));
-      const slice = bytes.subarray(0, maxLog - written);
+      const room = maxLog - footerBudget - written;
+      if (room <= 0) { if (text) truncated = true; return; }
+      const bytes = Buffer.from(diagnosticText(text));
+      if (bytes.length > room) truncated = true;
+      const slice = utf8Prefix(bytes, room);
       written += slice.length;
       await log.write(slice);
     };
@@ -160,21 +177,39 @@ export class DependenciesInstaller {
         remaining();
         request.progress?.(label);
         await append(`\n$ ${binary} ${args.join(" ")}\n`);
-        let stdout = "", stderr = "", outputSize = 0, streamed = false;
+        const output = { stdout: "", stderr: "" }, sizes = { stdout: 0, stderr: 0 }, omitted = { stdout: false, stderr: false };
+        let streamed = false;
         const capture = (text: string, stream: "stdout" | "stderr"): void => {
           streamed = true;
-          const chunk = Buffer.from(text).subarray(0, Math.max(0, maxLog - outputSize)).toString("utf8");
-          outputSize += Buffer.byteLength(chunk);
-          if (stream === "stdout") stdout += chunk; else stderr += chunk;
+          if (omitted[stream]) return;
+          // Separate budgets keep noisy stdout from consuming stderr. Never retain a
+          // cut raw record: credentials/ANSI sequences can span output callbacks.
+          const room = maxLog / 2 - sizes[stream];
+          const bytes = Buffer.from(text.slice(0, room));
+          const chunk = utf8Prefix(bytes, room).toString("utf8");
+          output[stream] += chunk; sizes[stream] += Buffer.byteLength(chunk);
+          if (chunk.length < text.length) {
+            output[stream] = completeRecords(output[stream]);
+            omitted[stream] = true; truncated = true;
+          }
+        };
+        const captured = (complete: boolean) => {
+          const stdout = complete ? output.stdout : completeRecords(output.stdout);
+          const stderr = complete ? output.stderr : completeRecords(output.stderr);
+          return `${stdout ? `stdout:\n${stdout}\n` : ""}${stderr ? `stderr:\n${stderr}\n` : ""}`;
         };
         try {
           const result = await this.execute(binary, args, { cwd: root, timeout: remaining(), env: environment, signal: request.signal, onOutput: capture });
           if (!streamed) capture(result, "stdout");
-          await append(`${stdout ? `stdout:\n${stdout}\n` : ""}${stderr ? `stderr:\n${stderr}\n` : ""}`);
+          await append(captured(true));
           remaining();
           return result;
         } catch (error) {
-          await append(`${stdout ? `stdout:\n${stdout}\n` : ""}${stderr ? `stderr:\n${stderr}\n` : ""}failed:\n${detailsOf(error)}\n`);
+          // A rejected executor may have cut its final callback at the output limit.
+          // Keep complete records here; Run supplies other final details separately.
+          if (completeRecords(output.stdout) !== output.stdout || completeRecords(output.stderr) !== output.stderr) truncated = true;
+          failureOutput = captured(false);
+          await append(failureOutput);
           const summary = `${label} failed: ${safeText(error instanceof Error ? error.message : String(error))} Install required tools/runtimes yourself; setup never bootstraps them.`;
           throw new WorkflowError(summary, false, `${summary}\n\n${detailsOf(error)}`);
         }
@@ -450,9 +485,20 @@ export class DependenciesInstaller {
       remaining();
       return { summary: `${manager} dependencies installed, including declared dev dependencies, in project-local .venv.`, venv };
     } catch (error) {
-      await append(`\nSetup failed: ${detailsOf(error)}\n`);
+      // Ordinary output cannot consume this space: keep the actual reason first,
+      // plus bounded failure details and captured output even after a noisy command.
+      failureFooter = Buffer.concat([
+        Buffer.from(`\nSetup failed: ${safeText(messageOf(error))}\n`),
+        fitDiagnostics(detailsOf(error), 32 * 1024),
+        ...(failureOutput ? [Buffer.from("\nCaptured failure output:\n"), fitDiagnostics(failureOutput, 16 * 1024)] : []),
+      ]);
       throw error;
-    } finally { await log.close(); }
+    } finally {
+      try {
+        if (truncated) await log.write(truncation);
+        if (failureFooter) await log.write(utf8Prefix(failureFooter, footerBudget - Buffer.byteLength(truncation)));
+      } finally { await log.close(); }
+    }
   }
 }
 
