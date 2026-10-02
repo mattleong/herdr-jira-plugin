@@ -11,7 +11,7 @@ The original idea was automatic dispatch when an assigned Jira ticket entered In
 ### User requirements
 
 - Invoke an action, paste a Jira ticket, create a worktree, launch an agent, and start work.
-- Use **Ctrl+B, then J** as the shortcut. Herdr’s existing pane-down binding is moved to **Ctrl+B, Down Arrow**.
+- Use **Ctrl+B, then Shift+J** as the shortcut, verified unused in Herdr 0.9.3 defaults and the local configuration. Leave default navigation intact: **Ctrl+B, then j** remains pane-down.
 - Use the repository of the currently focused Herdr pane, not a hardcoded repository.
 - Build separately from company application repositories; this project is `/Users/matleo/dev/herdr-jira-plugin`.
 - Default to the repository's default branch and automatically get its latest changes before creating the worktree (decision from this planning session).

@@ -1,6 +1,6 @@
 # Herdr Jira plugin
 
-Press **Ctrl+B, then J**, paste a Jira key or browse URL, optionally edit **Branch**, leave **Harness: Pi** selected, and start work in a new worktree of the repository in your focused Herdr pane.
+Press **Ctrl+B, then Shift+J**, paste a Jira key or browse URL, optionally edit **Branch**, leave **Harness: Pi** selected, and start work in a new worktree of the repository in your focused Herdr pane.
 
 - Fetches the remote default branch's latest commit without changing your current checkout.
 - Defaults the branch to the normalized ticket ID, e.g. `MAIL-1234`; you can edit it before launch.
@@ -37,20 +37,18 @@ herdr plugin link /Users/matleo/dev/herdr-jira-plugin
 herdr plugin action invoke local.jira.start
 ```
 
-Add to the appropriate tables in `~/.config/herdr/config.toml` (or your `HERDR_CONFIG_PATH`). Back up the file first; do not duplicate an existing `[keys]` table.
+Add this binding to `~/.config/herdr/config.toml` (or your `HERDR_CONFIG_PATH`). Back up the file first and check for existing bindings. `prefix+shift+j` is unused in Herdr 0.9.3's defaults.
 
 ```toml
-[keys]
-# Herdr's default prefix is Ctrl+B.
-# Reassign the original prefix+j pane-down binding to avoid a conflict.
-focus_pane_down = "prefix+down"
-
+# Ctrl+B, then Shift+J. Keep default pane navigation unchanged.
 [[keys.command]]
-key = "prefix+j"
+key = "prefix+shift+j"
 type = "plugin_action"
 command = "local.jira.start"
 description = "Start Jira ticket"
 ```
+
+If upgrading from the old shortcut, remove the plugin's `prefix+j` binding and its accompanying `focus_pane_down = "prefix+down"` override. This restores Herdr's default **Ctrl+B, then j** for pane-down.
 
 Then run `herdr server reload-config`. On this development machine, the plugin is linked and this binding has been installed; the previous config was backed up alongside it as `config.toml.before-jira-*`.
 
@@ -200,6 +198,6 @@ To uninstall locally:
 herdr plugin unlink local.jira
 ```
 
-Remove the shortcut and restore pane-down if desired. Unlinking does not remove your source, ticket worktrees, plugin settings, or state. For launch-action errors, inspect `herdr plugin log list --plugin local.jira`.
+Remove the shortcut if desired; default pane navigation is unchanged. Unlinking does not remove your source, ticket worktrees, plugin settings, or state. For launch-action errors, inspect `herdr plugin log list --plugin local.jira`.
 
 See [PLAN.md](PLAN.md) for context and scope. Other harnesses, automatic Jira triggers, dashboards, remote-machine routing, and auto-cleanup are deferred.
