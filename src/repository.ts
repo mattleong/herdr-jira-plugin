@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Config } from "./config.js";
-import { WorkflowError } from "./errors.js";
+import { WorkflowError, detailsOf } from "./errors.js";
 import { run, type Run } from "./process.js";
 
 export interface Repository { checkout: string; commonDir: string }
@@ -21,10 +21,14 @@ export class Git {
     try {
       checkout = await this.call(cwd, ["rev-parse", "--show-toplevel"]);
       common = await this.call(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    } catch { throw new WorkflowError("The originating pane is not in an accessible Git working tree."); }
+    } catch (error) { throw new WorkflowError("The originating pane is not in an accessible Git working tree.", false, detailsOf(error)); }
     return { checkout: await realpath(checkout), commonDir: await realpath(resolve(cwd, common)) };
   }
-  async fetchBase(repo: Repository, config: Config): Promise<Base> {
+  async validateBranch(repo: Repository, branch: string): Promise<void> {
+    const checked = await this.call(repo.checkout, ["check-ref-format", "--branch", branch]);
+    if (checked !== branch) throw new WorkflowError("Use a literal branch name, not a contextual Git expression.");
+  }
+  async fetchBase(repo: Repository, config: Config, onResolved?: (ref: string) => void): Promise<Base> {
     const override = config.repos[repo.commonDir] ?? {};
     const remote = override.remote ?? "origin";
     const remotes = (await this.call(repo.checkout, ["remote"])).split("\n");
@@ -36,6 +40,7 @@ export class Git {
       if (!branch) throw new WorkflowError("The remote did not advertise a default branch. Set baseBranch in config.json.");
     }
     await this.call(repo.checkout, ["check-ref-format", `refs/heads/${branch}`]);
+    onResolved?.(`${remote}/${branch}`);
     // FETCH_HEAD is shared across worktrees; use a private ref for this fetch and pin its SHA.
     const { randomUUID } = await import("node:crypto");
     const ref = `refs/herdr-jira/fetch/${randomUUID()}`;

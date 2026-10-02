@@ -33,7 +33,9 @@ test("fetches latest remote default commit without changing a dirty active branc
   await writeFile(join(f.source, "file.txt"), "dirty\n");
   await mkdir(join(f.source, "subfolder"));
   const git = new Git(), repo = await git.resolve(join(f.source, "subfolder"));
-  const base = await git.fetchBase(repo, defaults);
+  const resolved: string[] = [];
+  const base = await git.fetchBase(repo, defaults, ref => resolved.push(ref));
+  assert.deepEqual(resolved, ["origin/trunk"]);
   assert.equal(base.branch, "trunk"); assert.equal(base.sha, latest);
   assert.equal((await git.head(f.source)).branch, "feature");
   assert.equal((await git.head(f.source)).sha, original);
@@ -68,6 +70,17 @@ test("head returns the exact branch name even when a tag has the same name", asy
   await f.git(f.source, "switch", "--detach");
   await assert.rejects(git.head(f.source)); // Detached HEAD is still not a ticket branch.
 });
+test("Git validation accepts custom branch and rejects contextual expansion", async t => {
+  const f = await fixture(t), git = new Git(), repo = await git.resolve(f.source);
+  await git.validateBranch(repo, "feature/Mail-1");
+  await f.git(f.source, "switch", "-c", "other"); await f.git(f.source, "switch", "trunk");
+  await assert.rejects(git.validateBranch(repo, "@{-1}"), /literal branch name/);
+  for (const branch of ["HEAD", "-bad", "bad name", "foo..bar"]) await assert.rejects(git.validateBranch(repo, branch));
+  const sha = (await git.head(f.source)).sha;
+  await git.reserveBranch(repo, "feature/Mail-1", sha);
+  await assert.rejects(git.reserveBranch(repo, "feature/Mail-1", sha));
+});
+
 test("Git calls strip inherited repository selectors", async () => {
   const previous = process.env.GIT_DIR;
   process.env.GIT_DIR = "/wrong/repo";

@@ -2,6 +2,16 @@ import { stripVTControlCharacters } from "node:util";
 import stringWidth from "string-width";
 import { graphemes, snapGraphemeBoundary } from "./graphemes.js";
 
+// Paint the popup's own background instead of showing Herdr's gradient through default cells.
+// Erasing with this background also covers unused rows, margins and the final column without
+// printing into the bottom-right cell. Restore it after widget resets; keep focused accents.
+export function terminalScreen(text: string, color: boolean): string {
+  const reset = "\x1b[0m";
+  const background = color ? "\x1b[48;2;26;27;38m" : "";
+  const content = color ? text.replaceAll(reset, reset + background) : text;
+  return "\x1b[?25l" + reset + background + "\x1b[H\x1b[2J" + content + reset;
+}
+
 export const cells = (text: string): number => stringWidth(text);
 export const plain = (text: string): string => stripVTControlCharacters(text)
   .replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ");

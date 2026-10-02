@@ -22,5 +22,5 @@ id = "form"
 title = "Start Jira ticket"
 placement = "popup"
 width = 64
-height = 12
+height = 13
 command = ["node", "dist/form.js"]

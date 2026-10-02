@@ -1,76 +1,26 @@
 import { harnesses } from "./harnesses.js";
 import { basename } from "node:path";
 import { cells, clip, inputViewport, pad, plain, wrap } from "./display.js";
-import { nextGraphemeBoundary, previousGraphemeBoundary, snapGraphemeBoundary } from "./graphemes.js";
+import { validateForm, type FormModel, type Key } from "./form-model.js";
+import { errorView } from "./error-view.js";
+export { initialModel, update, validateForm, type FormModel, type Key, type FormEffect } from "./form-model.js";
 
-export interface FormModel { ticket: string; cursor: number; focus: 0 | 1 | 2; expanded: boolean; harness: string; error: string; recover: boolean }
-export type Key = { kind: "text" | "paste"; text: string } | { kind: "enter" | "space" | "escape" | "cancel" | "tab" | "backtab" | "up" | "down" | "left" | "right" | "home" | "end" | "backspace" | "delete" | "clear" | "open" };
-export type FormEffect = "submit" | "cancel" | "open" | undefined;
-export const initialModel = (): FormModel => ({ ticket: "", cursor: 0, focus: 0, expanded: false, harness: "pi", error: "", recover: false });
-export function update(model: FormModel, key: Key): FormEffect {
-  model.cursor = snapGraphemeBoundary(model.ticket, model.cursor);
-  if (key.kind === "cancel") return "cancel";
-  if (key.kind === "open") return "open";
-  if (key.kind === "escape") {
-    if (model.expanded) { model.expanded = false; return; }
-    return "cancel";
-  }
-  if (key.kind === "tab" || key.kind === "backtab") {
-    model.expanded = false;
-    model.focus = ((model.focus + (key.kind === "tab" ? 1 : 2)) % 3) as 0 | 1 | 2;
-    return;
-  }
-  if (key.kind === "paste" || key.kind === "text") {
-    if (model.focus !== 0) return;
-    const text = key.text.replace(/[\r\n]/g, "").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
-    if (model.ticket.length + text.length > 2048) { model.error = "Ticket input is too long."; return; }
-    model.ticket = model.ticket.slice(0, model.cursor) + text + model.ticket.slice(model.cursor);
-    model.cursor = snapGraphemeBoundary(model.ticket, model.cursor + text.length, "forward");
-    model.error = ""; model.recover = false;
-    return;
-  }
-  if (key.kind === "enter" || key.kind === "space") {
-    if (model.focus === 1) { model.expanded = !model.expanded; return; }
-    if (key.kind === "enter") return "submit";
-    return update(model, { kind: "text", text: " " });
-  }
-  if (model.focus === 1 && model.expanded && (key.kind === "up" || key.kind === "down")) {
-    const selected = harnesses.findIndex(harness => harness.id === model.harness);
-    const index = (selected + (key.kind === "down" ? 1 : harnesses.length - 1)) % harnesses.length;
-    model.harness = harnesses[index]!.id;
-    return;
-  }
-  if (model.focus !== 0) return;
-  if (key.kind === "left") model.cursor = previousGraphemeBoundary(model.ticket, model.cursor);
-  if (key.kind === "right") model.cursor = nextGraphemeBoundary(model.ticket, model.cursor);
-  if (key.kind === "home") model.cursor = 0;
-  if (key.kind === "end") model.cursor = model.ticket.length;
-  if (key.kind === "clear") { model.ticket = ""; model.cursor = 0; model.recover = false; }
-  if (key.kind === "backspace" && model.cursor > 0) {
-    const previous = previousGraphemeBoundary(model.ticket, model.cursor);
-    model.ticket = model.ticket.slice(0, previous) + model.ticket.slice(model.cursor);
-    model.cursor = snapGraphemeBoundary(model.ticket, previous); model.recover = false;
-  }
-  if (key.kind === "delete") {
-    model.ticket = model.ticket.slice(0, model.cursor) + model.ticket.slice(nextGraphemeBoundary(model.ticket, model.cursor));
-    model.cursor = snapGraphemeBoundary(model.ticket, model.cursor); model.recover = false;
-  }
-}
 export interface RenderOptions {
-  height?: number; color?: boolean; status?: string; busy?: boolean; canOpen?: boolean;
+  height?: number; color?: boolean; status?: string; base?: string; busy?: boolean; canOpen?: boolean;
 }
 export interface FormFrame {
-  text: string; cursor?: { row: number; column: number }; tooSmall: boolean;
+  text: string; cursor?: { row: number; column: number }; tooSmall: boolean; detailsOffset?: number;
 }
 export function renderFrame(model: FormModel, repository: string, width: number, options: RenderOptions = {}): FormFrame {
-  const height = Math.max(0, Math.floor(options.height ?? 10));
+  const height = Math.max(0, Math.floor(options.height ?? 11));
   const columns = Math.max(0, Math.floor(width));
   // Leave the last terminal column untouched to avoid autowrap at the bottom edge.
   const available = Math.max(0, columns - 1);
-  if (columns < 44 || height < 10) {
-    const lines = ["Enlarge to 44 × 10 to use this form.", options.busy ? "Launching; please wait." : "Esc to cancel"].slice(0, height);
+  if (columns < 44 || height < 11) {
+    const lines = ["Enlarge to 44 × 11 to use this form.", options.busy ? "Launching; please wait." : "Esc to cancel"].slice(0, height);
     return { text: lines.map(line => clip(line, available)).join("\r\n"), tooSmall: true };
   }
+  if (model.detailsOpen && !options.busy) return errorView(model, columns, height, !!options.color);
   const content = Math.min(64, available - 4);
   const left = 2;
   const margin = " ".repeat(left);
@@ -83,39 +33,54 @@ export function renderFrame(model: FormModel, repository: string, width: number,
   const lines: string[] = [];
   const row = (text = "") => lines.push(margin + text);
   row(muted("Repository  ") + bold(clip(basename(plain(repository)) || repository, content - 12)));
-  row();
+  row(options.base ? muted(clip("Base  " + options.base, content)) : "");
   const fieldTitle = "┌ Jira ticket ";
   row(border(fieldTitle + "─".repeat(content - cells(fieldTitle) - 1) + "┐"));
   const viewport = inputViewport(model.ticket, model.cursor, content - 4);
   const value = model.ticket ? pad(viewport.text, content - 4) : muted(pad("Paste a ticket ID or URL", content - 4));
-  const inputRow = lines.length + 1; // ANSI coordinates are one-based.
+  const inputRow = lines.length + 1;
   row(border("│") + " " + value + " " + border("│"));
   row(border("└" + "─".repeat(content - 2) + "┘"));
-  row();
+
+  const branchLabel = model.branchEdited ? "Branch* " : "Branch  ";
+  const branchView = inputViewport(model.branch, model.branchCursor, content - 12);
+  const branchValue = model.branch ? pad(branchView.text, content - 12) : muted(pad("Defaults to ticket ID", content - 12));
+  const branchPaint = (text: string) => active(1) ? accent(text) : muted(text);
+  const branchRow = lines.length + 1;
+  row(branchPaint(branchLabel + "[ ") + branchValue + branchPaint(" ]"));
+  row(model.setupRecovery && !options.busy ? accent(clip("Ctrl+S Start Pi anyway", content)) : "");
+
+  const validation = validateForm(model);
+  const enabled = validation.valid && !options.busy;
   const selected = harnesses.find(harness => harness.id === model.harness)?.label ?? "Unknown";
-  const label = options.busy ? "Working…" : model.recover ? "Resume launch →" : "Start work →";
+  const label = options.busy ? "Working…" : model.setupRecovery ? "Retry setup →" : model.recover ? "Resume launch →" : "Start work →";
   const button = `[ ${label} ]`;
   const harnessLabel = "Harness ";
   const selectorWidth = Math.min(14, content - cells(harnessLabel) - cells(button) - 2);
   const selector = "[ " + pad(selected, selectorWidth - 6) + ` ${model.expanded ? "▴" : "▾"} ]`;
   const gap = " ".repeat(content - cells(harnessLabel) - selectorWidth - cells(button));
-  row((active(1) ? accent(harnessLabel + selector) : muted(harnessLabel) + selector)
-    + gap + (options.busy ? muted(button) : active(2) ? paint(button, "1;48;5;111;38;5;16") : accent(button)));
+  row((active(2) ? accent(harnessLabel + selector) : muted(harnessLabel) + selector)
+    + gap + (!enabled ? muted(button) : active(3) ? paint(button, "1;48;5;111;38;5;16") : accent(button)));
   if (model.expanded) row(" ".repeat(cells(harnessLabel)) + paint(pad(`  ✓ ${selected}`, selectorWidth), "48;5;237;38;5;111"));
-  const showRecovery = !!(model.error && options.canOpen && !options.busy);
-  const feedback = options.status ?? model.error;
+  const showRecovery = !!(options.canOpen && !options.busy);
+  const validationMessage = model.ticket && validation.ticketError ? "Ticket: " + validation.ticketError
+    : validation.ticket && validation.branchError ? "Branch: " + validation.branchError : "";
+  const feedback = options.status ?? (model.error || (model.checkingSavedBranch ? "Checking saved ticket branch…" : validationMessage || (validation.ticket ? `Ready · ${validation.ticket.key}` : "Paste a ticket to begin.")));
   const feedbackLines = wrap(feedback, content, Math.min(2, height - lines.length - 1));
-  for (const line of feedbackLines) row(options.status ? muted(line) : paint(line, "38;5;203"));
-  if (!feedbackLines.length && !model.expanded) row();
+  const feedbackError = !options.status && !!(model.error || validationMessage);
+  for (const line of feedbackLines) row(feedbackError ? paint(line, "38;5;203") : muted(line));
   const hint = options.busy ? "Please wait — preparing your workspace."
     : model.expanded ? "↑↓ select · Enter confirm · Esc close"
-      : showRecovery ? "Ctrl+O open workspace · Esc cancel"
-        : active(1) ? "Tab next · Enter choose · Esc cancel"
-          : `Tab next · Enter ${model.recover ? "resume" : "start"} · Esc cancel`;
+      : showRecovery ? "Ctrl+O open · Ctrl+D more · Esc cancel"
+        : model.error ? "Ctrl+D details · Esc cancel"
+          : active(1) ? "Ctrl+R default · Tab next · Esc cancel"
+            : active(2) ? "Tab next · Enter choose · Esc cancel"
+              : enabled ? `Tab next · Enter ${model.setupRecovery ? "retry" : model.recover ? "resume" : "start"} · Esc cancel` : "Tab next · Esc cancel";
   row(muted(clip(hint, content)));
   return {
     text: lines.join("\r\n"), tooSmall: false,
-    cursor: active(0) ? { row: inputRow, column: left + 3 + viewport.caret } : undefined,
+    cursor: active(0) ? { row: inputRow, column: left + 3 + viewport.caret }
+      : active(1) ? { row: branchRow, column: left + cells(branchLabel) + 3 + branchView.caret } : undefined,
   };
 }
 export function render(model: FormModel, repository: string, width: number, status?: string): string {
@@ -136,7 +101,7 @@ export class InputDecoder {
     const sequences: Record<string, Key["kind"]> = {
       "\x1b[A":"up","\x1b[B":"down","\x1b[C":"right","\x1b[D":"left",
       "\x1b[H":"home","\x1b[F":"end","\x1b[1~":"home","\x1b[4~":"end",
-      "\x1b[3~":"delete","\x1b[Z":"backtab","\x1bOA":"up","\x1bOB":"down",
+      "\x1b[3~":"delete","\x1b[5~":"pageup","\x1b[6~":"pagedown","\x1b[Z":"backtab","\x1bOA":"up","\x1bOB":"down",
       "\x1bOC":"right","\x1bOD":"left","\x1bOH":"home","\x1bOF":"end",
     };
     while (this.buffer) {
@@ -183,7 +148,7 @@ export class InputDecoder {
       const point = this.buffer.codePointAt(0)!;
       if (this.buffer.length === 1 && point >= 0xd800 && point <= 0xdbff) return; // Incomplete surrogate pair.
       const char = this.buffer[0]!; this.buffer = this.buffer.slice(1);
-      const controls: Record<string, Key["kind"]> = { "\r":"enter","\n":"enter","\t":"tab","\x03":"cancel","\x0f":"open","\x7f":"backspace","\b":"backspace","\x01":"home","\x05":"end","\x15":"clear"," ":"space" };
+      const controls: Record<string, Key["kind"]> = { "\r":"enter","\n":"enter","\t":"tab","\x03":"cancel","\x0f":"open","\x04":"details","\x19":"copy","\x12":"reset_branch","\x13":"skip_setup","\x7f":"backspace","\b":"backspace","\x01":"home","\x05":"end","\x15":"clear"," ":"space" };
       if (controls[char]) this.emit({ kind: controls[char] } as Key);
     }
   }

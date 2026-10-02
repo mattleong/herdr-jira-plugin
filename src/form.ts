@@ -2,14 +2,16 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import { loadConfig, defaults } from "./config.js";
-import { WorkflowError, messageOf } from "./errors.js";
+import { WorkflowError, SetupError, messageOf, detailsOf } from "./errors.js";
+import { copyErrorDetails } from "./clipboard.js";
+import { lookupSavedBranch, cancelSavedBranchLookup } from "./saved-branch.js";
 import { Herdr } from "./herdr.js";
 import { launch, type LaunchResult } from "./launch.js";
 import { parseOrigin } from "./origin.js";
 import { Git } from "./repository.js";
 import { State } from "./state.js";
-import { parseTicket } from "./ticket.js";
-import { initialModel, InputDecoder, renderFrame, update, type Key } from "./ui.js";
+import { terminalScreen } from "./display.js";
+import { initialModel, InputDecoder, renderFrame, update, validateForm, type Key } from "./ui.js";
 
 async function main(): Promise<void> {
 const preview = process.argv.includes("--preview");
@@ -21,6 +23,10 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 const model = initialModel();
 let busy = false;
 let status: string | undefined;
+let base: string | undefined;
+let copying = false;
+let clipboardController: AbortController | undefined;
+let launchController: AbortController | undefined;
 let cleaned = false;
 let escapeTimer: NodeJS.Timeout | undefined;
 let existing: LaunchResult | undefined;
@@ -32,26 +38,31 @@ const configDirectory = process.env.HERDR_PLUGIN_CONFIG_DIR;
 const stateDirectory = process.env.HERDR_PLUGIN_STATE_DIR;
 if (!preview && (!configDirectory || !stateDirectory)) throw new WorkflowError("Missing Herdr plugin config/state directories.");
 const config = preview ? defaults : await loadConfig(configDirectory!);
+model.defaultSite = config.defaultJiraSite;
 const state = preview ? undefined : new State(stateDirectory!);
 
 function draw(): void {
+  const color = process.env.NO_COLOR === undefined && process.env.TERM !== "dumb";
   const frame = renderFrame(model, origin?.repo.checkout ?? "/example/repository (preview only)", process.stdout.columns ?? 80, {
     height: process.stdout.rows ?? 24,
-    color: process.env.NO_COLOR === undefined && process.env.TERM !== "dumb",
-    status, busy, canOpen: !!existing,
+    color,
+    status, base, busy, canOpen: !!existing,
   });
   tooSmall = frame.tooSmall;
-  process.stdout.write("\x1b[?25l\x1b[H\x1b[2J" + frame.text);
+  if (frame.detailsOffset !== undefined) model.detailsOffset = frame.detailsOffset;
+  process.stdout.write(terminalScreen(frame.text, color));
   if (frame.cursor) process.stdout.write(`\x1b[${frame.cursor.row};${frame.cursor.column}H\x1b[?25h`);
 }
 function cleanup(): void {
   if (cleaned) return;
   cleaned = true;
+  clipboardController?.abort(); // Synchronously kill an unacknowledged copy before process.exit drops timers.
+  launchController?.abort(); // Kill the currently owned installer on terminal exit/signals.
   clearTimeout(escapeTimer);
   process.stdin.off("data", onData);
   process.stdout.off("resize", draw);
   process.stdin.setRawMode(false); process.stdin.pause();
-  process.stdout.write("\x1b[?2004l\x1b[?25h\x1b[?1049l");
+  process.stdout.write("\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l");
 }
 function finish(result?: LaunchResult): void {
   cleanup();
@@ -61,28 +72,49 @@ function finish(result?: LaunchResult): void {
   }
   process.exit(0);
 }
-async function submit(): Promise<void> {
-  let ticket;
-  try { ticket = parseTicket(model.ticket, config.defaultJiraSite); }
-  catch (error) { model.error = messageOf(error); draw(); return; }
-  if (preview) { status = `Preview only: ${ticket.key}, Harness: Pi. No worktree or agent created.`; draw(); return; }
-  busy = true; existing = undefined;
-  const capturedInput = model.ticket;
+async function submit(skipSetup = false): Promise<void> {
+  if (busy || cleaned || model.detailsOpen || (skipSetup && !model.setupRecovery)) return;
+  const validation = validateForm(model);
+  if (!validation.valid || !validation.ticket) { draw(); return; }
+  const ticket = validation.ticket;
+  if (preview) { status = `Preview only: ${ticket.key} · Branch: ${model.branch} · Pi. Nothing launched.`; draw(); return; }
+  busy = true; // Synchronous admission: repeated Enter/Ctrl+S cannot start concurrent launches.
+  const setupAction = skipSetup ? "skip" : model.setupRecovery ? "retry" : undefined;
+  const recover = model.recover;
+  launchController = new AbortController();
+  existing = undefined; model.error = ""; model.errorDetails = ""; model.recover = false; model.setupRecovery = false;
+  status = "Checking repository and branch…"; draw();
+  const capturedInput = model.ticket, capturedBranch = model.branch, capturedHarness = model.harness;
   try {
-    const result = await launch({ origin: origin!, ticket, harness: model.harness, recover: model.recover }, {
-      git: new Git(), herdr: herdr!, state: state!, config,
-      progress: text => { status = text; draw(); },
+    const result = await launch({ origin: origin!, ticket, branch: model.branch, harness: model.harness, recover, setupAction }, {
+      git: new Git(), herdr: herdr!, state: state!, config, signal: launchController.signal,
+      progress: (text, resolvedBase) => { status = text; if (resolvedBase) base = resolvedBase; if (!cleaned) draw(); },
     });
     finish(result);
   } catch (error) {
-    status = undefined; model.error = messageOf(error);
+    status = undefined; model.error = messageOf(error); model.errorDetails = detailsOf(error);
     model.recover = error instanceof WorkflowError && error.recoverable;
+    model.setupRecovery = error instanceof SetupError;
     // A startup error must allow leaving the modal to answer Pi's login/trust/approval UI.
     const record = await state!.load(state!.key(origin!.repo.commonDir, ticket)).catch(() => undefined);
-    if (record?.workspaceId && record.checkout) existing = { workspaceId: record.workspaceId, paneId: record.paneId, checkout: record.checkout, message: model.error };
-    if (model.ticket !== capturedInput) model.recover = false;
-    busy = false; draw();
+    if (record?.repo === origin!.repo.commonDir && record.ticket.key === ticket.key && record.ticket.site === ticket.site && record.workspaceId && record.checkout) existing = { workspaceId: record.workspaceId, paneId: record.paneId, checkout: record.checkout, message: model.error };
+    if (model.ticket !== capturedInput || model.branch !== capturedBranch || model.harness !== capturedHarness) { model.recover = false; model.setupRecovery = false; }
+    launchController = undefined;
+    busy = false; if (!cleaned) draw();
   }
+}
+async function copyDetails(): Promise<void> {
+  if (copying) return;
+  copying = true;
+  clipboardController = new AbortController();
+  const details = model.errorDetails || model.error;
+  model.notice = "Copying error details…"; draw();
+  try {
+    await copyErrorDetails(details, { signal: clipboardController.signal });
+    if ((model.errorDetails || model.error) === details) model.notice = "Error details copied.";
+  } catch {
+    if ((model.errorDetails || model.error) === details) model.notice = "Copy failed: clipboard unavailable.";
+  } finally { copying = false; clipboardController = undefined; if (!cleaned) draw(); }
 }
 function onKey(key: Key): void {
   if (smoke || busy) return; // Smoke is display-only; mutations cannot be interrupted safely.
@@ -90,12 +122,18 @@ function onKey(key: Key): void {
     if (key.kind === "escape" || key.kind === "cancel") finish();
     return; // Never submit a form whose fields/controls are hidden by the terminal size.
   }
-  const previousTicket = model.ticket;
-  const effect = update(model, key);
-  if (model.ticket !== previousTicket) { existing = undefined; model.error = ""; status = undefined; }
+  const previousTicket = model.ticket, previousBranch = model.branch, previousHarness = model.harness;
+  const effect = update(model, key, busy);
+  if (model.ticket !== previousTicket || model.branch !== previousBranch || model.harness !== previousHarness || key.kind === "reset_branch") { existing = undefined; status = undefined; base = undefined; }
+  if (model.ticket === previousTicket && (model.branch !== previousBranch || key.kind === "reset_branch")) cancelSavedBranchLookup(model);
+  if (model.ticket !== previousTicket && !preview) {
+    void lookupSavedBranch(model, origin!.repo.commonDir, ticket => state!.load(state!.key(origin!.repo.commonDir, ticket))).then(() => { if (!cleaned) draw(); });
+  }
+  if (effect === "copy") { void copyDetails(); return; }
   if (effect === "cancel") return finish();
   if (effect === "open") { if (existing) finish(existing); return; }
   if (effect === "submit") { void submit(); return; }
+  if (effect === "skip_setup") { void submit(true); return; }
   draw();
 }
 const input = new InputDecoder(onKey);

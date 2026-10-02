@@ -24,6 +24,23 @@ test("harness registry exposes Pi only and rejects injected kinds", () => {
   assert.throws(() => getHarness("claude"));
   assert.throws(() => getHarness("--anything"));
 });
+test("setup config is backward-compatible, bounded, declarative and contained", () => {
+  assert.equal(parseConfig({}).setupTimeoutMs, 300000);
+  for (const setupTimeoutMs of [3001, 1800000]) assert.equal(parseConfig({ setupTimeoutMs }).setupTimeoutMs, setupTimeoutMs);
+  for (const setupTimeoutMs of [0, 3000, 1800001, 3001.5, "300000"]) assert.throws(() => parseConfig({ setupTimeoutMs }));
+  const wrap = (setup: unknown) => ({ repos: { "/repo/.git": { setup } } });
+  for (const manager of ["npm", "pnpm", "yarn", "bun", "uv", "poetry", "requirements", "go", "auto", "none"]) {
+    assert.equal(parseConfig(wrap({ manager })).repos["/repo/.git"]!.setup!.manager, manager);
+  }
+  assert.deepEqual(parseConfig(wrap({ directory: "service/api", python: "/opt/Python 3/bin/python3", requirements: ["service/requirements.txt", "service/requirements-dev.txt"] })).repos["/repo/.git"]!.setup,
+    { directory: "service/api", python: "/opt/Python 3/bin/python3", requirements: ["service/requirements.txt", "service/requirements-dev.txt"] });
+  for (const setup of [null, [], "npm", { command: "evil" }, { manager: "pip" }, { manager: [] }, { python: "python -m pip" }, { python: "$(evil)" }, { python: "-python" }, { python: "./python" }, { requirements: [] }, { requirements: "requirements.txt" }]) assert.throws(() => parseConfig(wrap(setup)));
+  for (const path of ["", "../outside", "inside/../../outside", "/absolute", "C:\\absolute", "foo\\..\\bar", "x\n", "--flag"]) {
+    assert.throws(() => parseConfig(wrap({ directory: path })));
+    assert.throws(() => parseConfig(wrap({ requirements: [path] })));
+  }
+  assert.equal(parseConfig(wrap({ directory: ".", python: "python3.12" })).repos["/repo/.git"]!.setup!.directory, ".");
+});
 test("validates config and keeps Pi interactive", () => {
   assert.equal(parseConfig({ defaultJiraSite: "https://jira.test", piArgs: ["--model", "provider/model"] }).defaultJiraSite, "jira.test");
   for (const config of [{ wrong: true }, { piArgs: ["--print"] }, { piArgs: ["--model", "x", "do work"] }, { piArgs: ["--resume", "x"] }, { piArgs: ["--no-extensions"] }, { startupTimeoutMs: 3000 }, { repos: { "/a": { remote: "--evil" } } }]) assert.throws(() => parseConfig(config));

@@ -10,6 +10,7 @@ test("first-pass form contains a functional Pi dropdown", () => {
   const model = initialModel();
   assert.match(render(model, "/repo", 80), /Harness +\[ Pi +▾ \]/);
   update(model, { kind: "tab" }); assert.equal(model.focus, 1);
+  update(model, { kind: "tab" }); assert.equal(model.focus, 2);
   update(model, { kind: "enter" }); assert.equal(model.expanded, true);
   assert.match(render(model, "/repo", 80), /✓ Pi/);
   update(model, { kind: "down" }); assert.equal(model.harness, "pi");
@@ -22,7 +23,7 @@ test("paste does not navigate the dropdown or submit", () => {
   const model = initialModel();
   assert.equal(update(model, { kind: "paste", text: "MAIL-1234\r\n" }), undefined);
   assert.equal(model.ticket, "MAIL-1234");
-  update(model, { kind: "tab" });
+  update(model, { kind: "tab" }); update(model, { kind: "tab" });
   update(model, { kind: "paste", text: "IGNORED-2" });
   assert.equal(model.ticket, "MAIL-1234");
 });
@@ -32,7 +33,7 @@ test("ticket editing resets recovery approval and supports cursor edits", () => 
   update(model, { kind: "left" }); update(model, { kind: "text", text: "3" });
   assert.equal(model.ticket, "MAIL-132");
   update(model, { kind: "backspace" }); assert.equal(model.ticket, "MAIL-12");
-  update(model, { kind: "tab" }); update(model, { kind: "tab" });
+  update(model, { kind: "tab" }); update(model, { kind: "tab" }); update(model, { kind: "tab" });
   assert.equal(update(model, { kind: "enter" }), "submit");
 });
 test("Unicode movement, insertion and deletion operate on complete graphemes", () => {
@@ -138,7 +139,7 @@ test("arrow and escape sequences decode without contaminating the ticket", () =>
 test("unknown CSI sequences are ignored even when fragmented", () => {
   const events: Key[] = [];
   const decoder = new InputDecoder(key => events.push(key));
-  for (const char of "\x1b[5~\x1b[1;5A") decoder.feed(char);
+  for (const char of "\x1b[15~\x1b[1;5A") decoder.feed(char);
   assert.deepEqual(events, []);
 });
 test("unsupported SS3 function keys never cancel the form or insert suffix characters", () => {
@@ -173,7 +174,7 @@ test("escape inside a fragmented paste is not interpreted as cancellation", () =
 });
 test("compact layout has one external title, a short repo name and aligned fields", () => {
   const model = initialModel();
-  const frame = renderFrame(model, "/Users/me/dev/herdr-jira-plugin", 62, { height: 10 });
+  const frame = renderFrame(model, "/Users/me/dev/herdr-jira-plugin", 62, { height: 11 });
   const lines = frame.text.split("\r\n");
   assert.doesNotMatch(frame.text, /Start Jira ticket|\/Users\/me|Ctrl\+O|Ctrl\+C/);
   assert.match(frame.text, /Repository +herdr-jira-plugin/);
@@ -182,17 +183,18 @@ test("compact layout has one external title, a short repo name and aligned field
   assert.match(lines[2]!, /┌ Jira ticket ─+┐/);
   assert.equal(cells(lines[2]!), cells(lines[3]!));
   assert.equal(cells(lines[2]!), cells(lines[4]!));
-  assert.equal(cells(lines[2]!), cells(lines[6]!)); // Shared controls row aligns to input.
+  assert.equal(cells(lines[2]!), cells(lines[7]!)); // Shared controls row aligns to input.
   assert.deepEqual(frame.cursor, { row: 4, column: 5 });
-  assert.match(lines[6]!, /Harness +\[ Pi +▾ \] +\[ Start work → \]$/);
-  assert.equal(lines.length, 9); // Only one spare interior row, not the old empty lower half.
+  assert.match(lines[7]!, /Harness +\[ Pi +▾ \] +\[ Start work → \]$/);
+  assert.match(lines[5]!, /Branch +\[ Defaults to ticket ID +\]/);
+  assert.equal(lines.length, 10); // Only one spare interior row, not the old empty lower half.
 });
 test("all focus, dropdown, feedback and color states stay within the viewport", () => {
   for (const width of [8, 16, 43, 44, 62, 64, 70, 120]) {
-    for (const height of [0, 1, 8, 9, 10, 12, 24]) {
-      for (const focus of [0, 1, 2] as const) {
+    for (const height of [0, 1, 8, 9, 10, 11, 12, 24]) {
+      for (const focus of [0, 1, 2, 3] as const) {
         const model = initialModel();
-        model.focus = focus; model.expanded = focus === 1;
+        model.focus = focus; model.expanded = focus === 2;
         model.ticket = "https://example.test/browse/" + "A".repeat(180);
         model.cursor = model.ticket.length;
         model.error = "A long startup error with a path /Users/me/somewhere. ".repeat(20);
@@ -207,9 +209,9 @@ test("all focus, dropdown, feedback and color states stay within the viewport", 
         if (frame.cursor) {
           assert.ok(frame.cursor.row <= height && frame.cursor.row > 0);
           assert.ok(frame.cursor.column < width && frame.cursor.column > 0);
-          assert.equal(focus, 0);
+          assert.ok(focus === 0 || focus === 1);
         }
-        if (width < 44 || height < 10) { assert.equal(frame.tooSmall, true); assert.equal(frame.cursor, undefined); }
+        if (width < 44 || height < 11) { assert.equal(frame.tooSmall, true); assert.equal(frame.cursor, undefined); }
         else assert.equal(frame.tooSmall, false);
       }
     }
@@ -220,18 +222,18 @@ test("minimum-size controls and contextual help remain visible in every launch s
     for (const recover of [false, true]) for (const canOpen of [false, true]) {
       for (const expanded of [false, true]) for (const busy of [false, true]) {
         const model = initialModel();
-        model.focus = expanded ? 1 : 2; model.expanded = expanded; model.recover = recover;
+        model.focus = expanded ? 2 : 3; model.expanded = expanded; model.recover = recover;
         model.error = "A long error with recovery instructions. ".repeat(30);
-        const frame = renderFrame(model, "/repo", width, { height: 10, busy, canOpen, status: busy ? "Preparing workspace…" : undefined });
+        const frame = renderFrame(model, "/repo", width, { height: 11, busy, canOpen, status: busy ? "Preparing workspace…" : undefined });
         const lines = frame.text.split("\r\n");
         assert.equal(frame.tooSmall, false);
         assert.match(lines[2]!, /┌ Jira ticket /);
-        assert.match(lines[6]!, /Harness +\[ Pi +[▾▴] \]/);
-        assert.ok(lines[6]!.endsWith(`[ ${busy ? "Working…" : recover ? "Resume launch →" : "Start work →"} ]`));
-        assert.ok(lines.length <= 10);
+        assert.match(lines[7]!, /Harness +\[ Pi +[▾▴] \]/);
+        assert.ok(lines[7]!.endsWith(`[ ${busy ? "Working…" : recover ? "Resume launch →" : "Start work →"} ]`));
+        assert.ok(lines.length <= 11);
         assert.equal(lines.filter(line => /Esc (cancel|close)|Please wait/.test(line)).length, 1);
-        if (expanded) assert.equal(lines[7]!.indexOf("✓"), lines[6]!.indexOf("[ Pi") + 2);
-        if (canOpen && !expanded && !busy) assert.match(lines.at(-1)!, /Ctrl\+O open workspace · Esc cancel/);
+        if (expanded) assert.equal(lines[8]!.indexOf("✓"), lines[7]!.indexOf("[ Pi") + 2);
+        if (canOpen && !expanded && !busy) assert.match(lines.at(-1)!, /Ctrl\+O open · Ctrl\+D more · Esc cancel/);
         if (busy) assert.doesNotMatch(frame.text, /Ctrl\+O|Esc cancel|Enter resume/);
         for (const line of lines) assert.ok(cells(line) < width);
       }
@@ -276,9 +278,9 @@ test("footer reflects actual recovery availability, dropdown state and busy stat
   const model = initialModel();
   model.error = "Failed to start Pi."; model.recover = true;
   assert.doesNotMatch(renderFrame(model, "/repo", 70).text, /Ctrl\+O/);
-  assert.match(renderFrame(model, "/repo", 70, { canOpen: true }).text, /Ctrl\+O open workspace/);
+  assert.match(renderFrame(model, "/repo", 70, { canOpen: true }).text, /Ctrl\+O open/);
   assert.match(renderFrame(model, "/repo", 70).text, /Resume launch →/);
-  model.focus = 1; model.expanded = true;
+  model.focus = 2; model.expanded = true;
   assert.match(renderFrame(model, "/repo", 70).text, /Enter confirm · Esc close/);
   const busy = renderFrame(model, "/repo", 70, { busy: true, status: "Fetching latest changes…", canOpen: true });
   assert.doesNotMatch(busy.text, /Esc cancel|Ctrl\+O|Enter confirm/);
