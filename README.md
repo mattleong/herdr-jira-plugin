@@ -51,7 +51,7 @@ Then run `herdr server reload-config`. On this development machine, the plugin i
 
 ## Form controls
 
-The compact 72 × 18 popup shows the repository name, a bordered ticket field, and a keyboard-operable Harness dropdown. Focused controls use an accent color; set `NO_COLOR` to disable ANSI styling. Recovery help appears only when a preserved workspace is available. On very small terminals, enlarge the form to at least 44 × 16 interior cells before submitting; your input is retained during resize.
+The compact 64 × 12 popup shows the repository name, a labeled ticket field, and a keyboard-operable Harness dropdown beside the Start work button. Focused controls use an accent color; set `NO_COLOR` to disable ANSI styling. The footer switches to recovery help when a preserved workspace is available. On very small terminals, enlarge the form to at least 44 × 10 interior cells before submitting; your input is retained during resize.
 
 - Paste a key (`MAIL-1234`) or an HTTPS Jira browse URL (`https://company.atlassian.net/browse/MAIL-1234`).
 - **Tab / Shift+Tab:** move between Ticket, Harness, and Start work.

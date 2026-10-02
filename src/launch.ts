@@ -54,7 +54,10 @@ export async function launch(request: LaunchRequest, deps: Dependencies): Promis
       if (record.phase === "dispatched" || record.phase === "submitting") {
         const panes = await herdr.panes(record.workspaceId!);
         const livePane = panes.find(pane => pane.pane_id === record!.paneId && pane.workspace_id === record!.workspaceId && pane.terminal_id === record!.terminalId);
-        const validPane = livePane && livePane.cwd && (await git.resolve(livePane.foreground_cwd ?? livePane.cwd)).checkout === record.checkout ? livePane : undefined;
+        // The checkout/workspace is already verified. A stale pane cwd must not block opening it.
+        const paneCwd = livePane?.foreground_cwd ?? livePane?.cwd;
+        const paneRepo = paneCwd ? await git.resolve(paneCwd).catch(() => undefined) : undefined;
+        const validPane = paneRepo?.checkout === record.checkout && paneRepo.commonDir === currentRepo.commonDir ? livePane : undefined;
         await state.save(key, record);
         return {
           workspaceId: record.workspaceId!, paneId: validPane?.pane_id, checkout: record.checkout,

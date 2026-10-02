@@ -14,14 +14,17 @@ import type { Origin } from "../src/origin.js";
 async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "jira-launch-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const checkout = join(root, "MAIL-1234"), commonDir = join(root, ".git");
+  const checkout = join(root, "MAIL-1234"), commonDir = join(root, ".git"), outside = join(root, "outside");
   const calls: string[] = [];
   let exists = false, sha = "a".repeat(40), currentBranch = "MAIL-1234";
   let failFetch = false, failPrompt = false, blockStart = false;
   let pane: Pane = { pane_id: "w2:p1", workspace_id: "w2", terminal_id: "term2", cwd: checkout };
   let agent: Agent | undefined;
   const git = {
-    resolve: async (cwd: string) => ({ checkout: cwd, commonDir }),
+    resolve: async (cwd: string) => {
+      if (cwd === outside) throw new Error("Not a Git working tree");
+      return { checkout: cwd, commonDir };
+    },
     branchExists: async () => exists,
     fetchBase: async () => { calls.push("fetch"); if (failFetch) throw new Error("fetch failed"); return { remote: "origin", branch: "trunk", sha }; },
     reserveBranch: async (_repo: unknown, branch: string) => { calls.push("reserve:" + branch); assert.equal(exists, false); exists = true; },
@@ -63,6 +66,9 @@ async function setup(t: { after: (fn: () => Promise<unknown>) => void }) {
     blockStart: () => { blockStart = true; },
     ready: () => { agent = { ...agent!, interactive_ready: true, agent_status: "idle" }; },
     closePane: () => { pane = undefined as unknown as Pane; },
+    paneOutsideGit: () => { pane = { ...pane, foreground_cwd: outside }; },
+    paneOtherCheckout: () => { pane = { ...pane, foreground_cwd: root }; },
+    replaceTerminal: () => { pane = { ...pane, terminal_id: "unrelated-terminal" }; },
     changeBranch: () => { currentBranch = "OTHER-1"; },
     changeHead: () => { sha = "b".repeat(40); },
   };
@@ -85,6 +91,38 @@ test("duplicate dispatch with a closed pane still opens the verified workspace",
   assert.equal(result.workspaceId, "w2"); assert.equal(result.paneId, undefined);
   assert.match(result.message, /start it manually/);
   assert.equal(f.calls.filter(c => c === "prompt").length, 1);
+});
+test("duplicate reopening ignores an outside-Git foreground cwd without using stale pane cwd", async t => {
+  for (const uncertain of [false, true]) {
+    const f = await setup(t);
+    if (uncertain) { f.failPrompt(); await assert.rejects(launch(f.request, f.deps), /timeout/); }
+    else await launch(f.request, f.deps);
+    f.paneOutsideGit();
+    const calls = [...f.calls];
+    const result = await launch(f.request, f.deps);
+    assert.equal(result.workspaceId, "w2"); assert.equal(result.paneId, undefined);
+    if (uncertain) assert.match(result.message, /uncertain/);
+    assert.deepEqual(f.calls, calls); // No create/open/start/prompt while reopening.
+  }
+});
+test("duplicate reopening does not follow another checkout or a replaced terminal", async t => {
+  for (const scenario of ["paneOtherCheckout", "replaceTerminal"] as const) {
+    const f = await setup(t);
+    await launch(f.request, f.deps); f[scenario]();
+    const calls = [...f.calls];
+    const result = await launch(f.request, f.deps);
+    assert.equal(result.workspaceId, "w2"); assert.equal(result.paneId, undefined);
+    assert.deepEqual(f.calls, calls);
+  }
+});
+test("partial startup keeps strict pane cwd validation and never sends a prompt outside Git", async t => {
+  const f = await setup(t); f.blockStart();
+  await assert.rejects(launch(f.request, f.deps));
+  f.ready(); f.paneOutsideGit();
+  const calls = [...f.calls];
+  await assert.rejects(launch({ ...f.request, recover: true }, f.deps), /Not a Git working tree/);
+  assert.deepEqual(f.calls, calls);
+  assert.equal(f.calls.filter(call => call === "prompt").length, 0);
 });
 test("fetch failure creates no branch or workspace and unknown harness changes nothing", async t => {
   const f = await setup(t);

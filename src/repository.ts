@@ -57,10 +57,12 @@ export class Git {
     await this.call(repo.checkout, ["update-ref", `refs/heads/${branch}`, sha, "0".repeat(sha.length)]);
   }
   async head(checkout: string): Promise<{ sha: string; branch: string }> {
-    return {
-      sha: await this.call(checkout, ["rev-parse", "--verify", "HEAD"]),
-      branch: await this.call(checkout, ["symbolic-ref", "--short", "HEAD"]),
-    };
+    const sha = await this.call(checkout, ["rev-parse", "--verify", "HEAD"]);
+    const ref = await this.call(checkout, ["symbolic-ref", "HEAD"]);
+    const prefix = "refs/heads/";
+    if (!ref.startsWith(prefix)) throw new WorkflowError("The checkout is not on a local branch.");
+    // --short disambiguates against tags and can return heads/KEY instead of the actual name.
+    return { sha, branch: ref.slice(prefix.length) };
   }
   async worktreeFor(repo: Repository, branch: string): Promise<string | undefined> {
     const output = await this.call(repo.checkout, ["worktree", "list", "--porcelain", "-z"]);

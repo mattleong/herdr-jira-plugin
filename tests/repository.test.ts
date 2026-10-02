@@ -54,6 +54,20 @@ test("missing remote/default and fetch failure do not create a ticket branch", a
   await assert.rejects(git.fetchBase(repo, { ...defaults, repos: { [repo.commonDir]: { baseBranch: "deleted" } } }));
   assert.equal(await git.branchExists(repo, "MAIL-99"), false);
 });
+test("head returns the exact branch name even when a tag has the same name", async t => {
+  const f = await fixture(t), git = new Git();
+  for (const branch of ["MAIL-1", "heads/MAIL-2"]) {
+    await f.git(f.source, "switch", "-c", branch);
+    await f.git(f.source, "tag", branch);
+    assert.equal((await git.head(f.source)).branch, branch);
+    const linked = join(f.root, branch.replace("/", "-"));
+    await f.git(f.source, "switch", "trunk");
+    await f.git(f.source, "worktree", "add", linked, branch);
+    assert.equal((await git.head(linked)).branch, branch);
+  }
+  await f.git(f.source, "switch", "--detach");
+  await assert.rejects(git.head(f.source)); // Detached HEAD is still not a ticket branch.
+});
 test("Git calls strip inherited repository selectors", async () => {
   const previous = process.env.GIT_DIR;
   process.env.GIT_DIR = "/wrong/repo";

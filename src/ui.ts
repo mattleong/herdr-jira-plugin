@@ -1,12 +1,14 @@
 import { harnesses } from "./harnesses.js";
 import { basename } from "node:path";
 import { cells, clip, inputViewport, pad, plain, wrap } from "./display.js";
+import { nextGraphemeBoundary, previousGraphemeBoundary, snapGraphemeBoundary } from "./graphemes.js";
 
 export interface FormModel { ticket: string; cursor: number; focus: 0 | 1 | 2; expanded: boolean; harness: string; error: string; recover: boolean }
 export type Key = { kind: "text" | "paste"; text: string } | { kind: "enter" | "space" | "escape" | "cancel" | "tab" | "backtab" | "up" | "down" | "left" | "right" | "home" | "end" | "backspace" | "delete" | "clear" | "open" };
 export type FormEffect = "submit" | "cancel" | "open" | undefined;
 export const initialModel = (): FormModel => ({ ticket: "", cursor: 0, focus: 0, expanded: false, harness: "pi", error: "", recover: false });
 export function update(model: FormModel, key: Key): FormEffect {
+  model.cursor = snapGraphemeBoundary(model.ticket, model.cursor);
   if (key.kind === "cancel") return "cancel";
   if (key.kind === "open") return "open";
   if (key.kind === "escape") {
@@ -23,7 +25,8 @@ export function update(model: FormModel, key: Key): FormEffect {
     const text = key.text.replace(/[\r\n]/g, "").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
     if (model.ticket.length + text.length > 2048) { model.error = "Ticket input is too long."; return; }
     model.ticket = model.ticket.slice(0, model.cursor) + text + model.ticket.slice(model.cursor);
-    model.cursor += text.length; model.error = ""; model.recover = false;
+    model.cursor = snapGraphemeBoundary(model.ticket, model.cursor + text.length, "forward");
+    model.error = ""; model.recover = false;
     return;
   }
   if (key.kind === "enter" || key.kind === "space") {
@@ -38,15 +41,20 @@ export function update(model: FormModel, key: Key): FormEffect {
     return;
   }
   if (model.focus !== 0) return;
-  if (key.kind === "left") model.cursor = Math.max(0, model.cursor - 1);
-  if (key.kind === "right") model.cursor = Math.min(model.ticket.length, model.cursor + 1);
+  if (key.kind === "left") model.cursor = previousGraphemeBoundary(model.ticket, model.cursor);
+  if (key.kind === "right") model.cursor = nextGraphemeBoundary(model.ticket, model.cursor);
   if (key.kind === "home") model.cursor = 0;
   if (key.kind === "end") model.cursor = model.ticket.length;
   if (key.kind === "clear") { model.ticket = ""; model.cursor = 0; model.recover = false; }
   if (key.kind === "backspace" && model.cursor > 0) {
-    model.ticket = model.ticket.slice(0, model.cursor - 1) + model.ticket.slice(model.cursor); model.cursor--; model.recover = false;
+    const previous = previousGraphemeBoundary(model.ticket, model.cursor);
+    model.ticket = model.ticket.slice(0, previous) + model.ticket.slice(model.cursor);
+    model.cursor = snapGraphemeBoundary(model.ticket, previous); model.recover = false;
   }
-  if (key.kind === "delete") { model.ticket = model.ticket.slice(0, model.cursor) + model.ticket.slice(model.cursor + 1); model.recover = false; }
+  if (key.kind === "delete") {
+    model.ticket = model.ticket.slice(0, model.cursor) + model.ticket.slice(nextGraphemeBoundary(model.ticket, model.cursor));
+    model.cursor = snapGraphemeBoundary(model.ticket, model.cursor); model.recover = false;
+  }
 }
 export interface RenderOptions {
   height?: number; color?: boolean; status?: string; busy?: boolean; canOpen?: boolean;
@@ -55,12 +63,12 @@ export interface FormFrame {
   text: string; cursor?: { row: number; column: number }; tooSmall: boolean;
 }
 export function renderFrame(model: FormModel, repository: string, width: number, options: RenderOptions = {}): FormFrame {
-  const height = Math.max(0, Math.floor(options.height ?? 16));
+  const height = Math.max(0, Math.floor(options.height ?? 10));
   const columns = Math.max(0, Math.floor(width));
   // Leave the last terminal column untouched to avoid autowrap at the bottom edge.
   const available = Math.max(0, columns - 1);
-  if (columns < 44 || height < 16) {
-    const lines = ["Enlarge to 44 × 16 to use this form.", options.busy ? "Launching; please wait." : "Esc to cancel"].slice(0, height);
+  if (columns < 44 || height < 10) {
+    const lines = ["Enlarge to 44 × 10 to use this form.", options.busy ? "Launching; please wait." : "Esc to cancel"].slice(0, height);
     return { text: lines.map(line => clip(line, available)).join("\r\n"), tooSmall: true };
   }
   const content = Math.min(64, available - 4);
@@ -72,12 +80,12 @@ export function renderFrame(model: FormModel, repository: string, width: number,
   const bold = (text: string) => paint(text, "1");
   const active = (focus: number) => !options.busy && model.focus === focus;
   const border = (text: string) => active(0) ? accent(text) : muted(text);
-  const lines: string[] = [""];
+  const lines: string[] = [];
   const row = (text = "") => lines.push(margin + text);
   row(muted("Repository  ") + bold(clip(basename(plain(repository)) || repository, content - 12)));
   row();
-  row(active(0) ? accent("Jira ticket") : muted("Jira ticket"));
-  row(border("┌" + "─".repeat(content - 2) + "┐"));
+  const fieldTitle = "┌ Jira ticket ";
+  row(border(fieldTitle + "─".repeat(content - cells(fieldTitle) - 1) + "┐"));
   const viewport = inputViewport(model.ticket, model.cursor, content - 4);
   const value = model.ticket ? pad(viewport.text, content - 4) : muted(pad("Paste a ticket ID or URL", content - 4));
   const inputRow = lines.length + 1; // ANSI coordinates are one-based.
@@ -85,23 +93,25 @@ export function renderFrame(model: FormModel, repository: string, width: number,
   row(border("└" + "─".repeat(content - 2) + "┘"));
   row();
   const selected = harnesses.find(harness => harness.id === model.harness)?.label ?? "Unknown";
-  const selectorWidth = content - 12;
-  const selector = "[ " + pad(selected, selectorWidth - 6) + ` ${model.expanded ? "▴" : "▾"} ]`;
-  row((active(1) ? accent("Harness     ") : muted("Harness     ")) + (active(1) ? accent(selector) : selector));
-  row(model.expanded ? " ".repeat(12) + paint(pad(`  ✓ ${selected}`, selectorWidth), "48;5;237;38;5;111") : "");
   const label = options.busy ? "Working…" : model.recover ? "Resume launch →" : "Start work →";
   const button = `[ ${label} ]`;
-  row(" ".repeat(Math.max(0, content - cells(button))) + (options.busy ? muted(button) : active(2) ? paint(button, "1;48;5;111;38;5;16") : accent(button)));
-  row();
+  const harnessLabel = "Harness ";
+  const selectorWidth = Math.min(14, content - cells(harnessLabel) - cells(button) - 2);
+  const selector = "[ " + pad(selected, selectorWidth - 6) + ` ${model.expanded ? "▴" : "▾"} ]`;
+  const gap = " ".repeat(content - cells(harnessLabel) - selectorWidth - cells(button));
+  row((active(1) ? accent(harnessLabel + selector) : muted(harnessLabel) + selector)
+    + gap + (options.busy ? muted(button) : active(2) ? paint(button, "1;48;5;111;38;5;16") : accent(button)));
+  if (model.expanded) row(" ".repeat(cells(harnessLabel)) + paint(pad(`  ✓ ${selected}`, selectorWidth), "48;5;237;38;5;111"));
   const showRecovery = !!(model.error && options.canOpen && !options.busy);
   const feedback = options.status ?? model.error;
-  const feedbackLines = wrap(feedback, content, Math.min(3, height - lines.length - (showRecovery ? 2 : 1)));
+  const feedbackLines = wrap(feedback, content, Math.min(2, height - lines.length - 1));
   for (const line of feedbackLines) row(options.status ? muted(line) : paint(line, "38;5;203"));
-  if (showRecovery) row(muted("Ctrl+O open preserved workspace"));
+  if (!feedbackLines.length && !model.expanded) row();
   const hint = options.busy ? "Please wait — preparing your workspace."
     : model.expanded ? "↑↓ select · Enter confirm · Esc close"
-      : active(1) ? "Tab next · Enter choose · Esc cancel"
-        : `Tab next · Enter ${model.recover ? "resume" : "start"} · Esc cancel`;
+      : showRecovery ? "Ctrl+O open workspace · Esc cancel"
+        : active(1) ? "Tab next · Enter choose · Esc cancel"
+          : `Tab next · Enter ${model.recover ? "resume" : "start"} · Esc cancel`;
   row(muted(clip(hint, content)));
   return {
     text: lines.join("\r\n"), tooSmall: false,
@@ -150,19 +160,31 @@ export class InputDecoder {
       }
       if (this.buffer[0] === "\x1b") {
         if (["\x1b[200~", ...Object.keys(sequences)].some(seq => seq.startsWith(this.buffer))) return;
-        // Ignore an unknown CSI/control sequence rather than injecting its contents into a ticket.
-        if (/^\x1b\[[0-?]*[ -/]*$/.test(this.buffer)) {
+        // Ignore unsupported CSI and SS3 (e.g. F1–F4) sequences, including fragmented input.
+        if (/^\x1b(?:\[|O)[0-?]*[ -/]*$/.test(this.buffer)) {
           if (this.buffer.length > 128) this.buffer = ""; // Bound malformed sequences.
           return;
         }
-        const unknown = /^\x1b\[[0-?]*[ -/]*[@-~]/.exec(this.buffer);
+        const unknown = /^\x1b(?:\[|O)[0-?]*[ -/]*[@-~]/.exec(this.buffer);
         if (unknown) { this.buffer = this.buffer.slice(unknown[0].length); continue; }
         this.buffer = this.buffer.slice(1); this.emit({ kind: "escape" }); continue;
       }
+      // Insert a printable run atomically. Per-code-point edits can merge with existing suffix
+      // graphemes and move the caret past them before the remainder of an IME/emoji arrives.
+      let text = "";
+      while (this.buffer) {
+        const point = this.buffer.codePointAt(0)!;
+        if (this.buffer.length === 1 && point >= 0xd800 && point <= 0xdbff) break;
+        if (point <= 0x20 || point === 0x7f) break;
+        text += point >= 0xd800 && point <= 0xdfff ? "\ufffd" : String.fromCodePoint(point);
+        this.buffer = this.buffer.slice(point > 0xffff ? 2 : 1);
+      }
+      if (text) { this.emit({ kind: "text", text }); continue; }
+      const point = this.buffer.codePointAt(0)!;
+      if (this.buffer.length === 1 && point >= 0xd800 && point <= 0xdbff) return; // Incomplete surrogate pair.
       const char = this.buffer[0]!; this.buffer = this.buffer.slice(1);
       const controls: Record<string, Key["kind"]> = { "\r":"enter","\n":"enter","\t":"tab","\x03":"cancel","\x0f":"open","\x7f":"backspace","\b":"backspace","\x01":"home","\x05":"end","\x15":"clear"," ":"space" };
       if (controls[char]) this.emit({ kind: controls[char] } as Key);
-      else if (char >= " " && char !== "\x7f") this.emit({ kind: "text", text: char });
     }
   }
 }
