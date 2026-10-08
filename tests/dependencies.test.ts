@@ -38,6 +38,7 @@ function fake(overrides: Record<string, string> = {}, hook?: (call: Call) => Pro
     const result = await hook?.(call);
     if (typeof result === "string") return result;
     const root = options.cwd!;
+    if (binary === "corepack" && args[1] === "--version") return overrides.corepackPnpm ?? args[0]!.slice("pnpm@".length).split("+")[0]!;
     if (args[0] === "--version") return versions[binary] ?? "1.0.0";
     if (binary === "go") return args[0] === "version" ? "go version go1.24.1 linux/amd64" : "";
     if (binary === "uv" && args[0] === "python") return "/installed/python3";
@@ -57,7 +58,7 @@ function environment(t: TestContext, values: Record<string, string | undefined>)
   for (const [key, value] of Object.entries(values)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
   t.after(() => { for (const [key, value] of Object.entries(before)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
 }
-const installs = (calls: Call[]) => calls.filter(call => ["ci", "install", "sync"].includes(call.args[0]!) || call.args.includes("pip") && call.args.includes("install"));
+const installs = (calls: Call[]) => calls.filter(call => ["ci", "install", "sync"].includes(call.args[call.binary === "corepack" ? 1 : 0]!) || call.args.includes("pip") && call.args.includes("install"));
 
 test("empty roots and manager=none do not install; logs are exclusive/private", async t => {
   const f = await fixture(t), runner = fake(), request = f.request();
@@ -102,11 +103,107 @@ test("npm pins strip integrity metadata; dev install ignores inherited productio
 test("pnpm uses frozen/dev-inclusive install and parser-compatible config guards for both probe and install", async t => {
   const f = await fixture(t, packageFiles("pnpm", { packageManager: "pnpm@10.34.4" })), runner = fake({ pnpm: "10.34.4" });
   await runner.installer.prepare(f.request());
-  const guards = ["--config.manage-package-manager-versions=false", "--config.use-node-version=", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm", `--lockfile-dir=${f.checkout}`];
+  const guards = ["--config.manage-package-manager-versions=false", "--config.pm-on-fail=ignore", "--config.use-node-version=", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm", `--lockfile-dir=${f.checkout}`];
   assert.deepEqual(runner.calls.filter(call => call.binary === "pnpm").map(call => call.args), [
     ["--version", ...guards],
     ["install", "--frozen-lockfile", "--prod=false", ...guards],
   ]);
+  assert.ok(!runner.calls.some(call => call.binary === "corepack"));
+});
+test("pnpm mismatch selects the exact Corepack pin privately with guards and without changing project files", async t => {
+  const pin = `pnpm@12.8.1+sha512.${"a".repeat(128)}`;
+  const files = packageFiles("pnpm", { packageManager: pin.replace("a".repeat(128), "A".repeat(128)), engines: { pnpm: ">=12" } });
+  const f = await fixture(t, { ...files, ".corepack.env": "COREPACK_ENABLE_AUTO_PIN=1\nCOREPACK_ENABLE_NETWORK=0\nCOREPACK_INTEGRITY_KEYS=0\n" });
+  environment(t, { COREPACK_HOME: "/shared", COREPACK_ENABLE_DOWNLOAD_PROMPT: "1", COREPACK_ENABLE_AUTO_PIN: "1", COREPACK_DEFAULT_TO_LATEST: "1", COREPACK_ENV_FILE: "/outside", COREPACK_INTEGRITY_KEYS: "0" });
+  const runner = fake({ pnpm: "10.34.4" }, async call => {
+    if (call.binary === "corepack") assert.equal((await lstat(call.options.env!.COREPACK_HOME!)).mode & 0o777, 0o700);
+  });
+  const request = f.request(), result = await runner.installer.prepare(request);
+  assert.match(result.summary, /including dev/);
+  const wrapped = runner.calls.filter(call => call.binary === "corepack");
+  const guards = ["--config.manage-package-manager-versions=false", "--config.pm-on-fail=ignore", "--config.use-node-version=", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm", `--lockfile-dir=${f.checkout}`];
+  assert.deepEqual(wrapped.map(call => call.args), [[pin, "--version", ...guards], [pin, "install", "--frozen-lockfile", "--prod=false", ...guards]]);
+  assert.deepEqual(wrapped.map(call => call.options.env?.COREPACK_ENABLE_NETWORK), ["1", "0"]);
+  const cache = wrapped[0]!.options.env!.COREPACK_HOME!;
+  assert.notEqual(cache, "/shared");
+  for (const call of wrapped) {
+    const env = call.options.env!;
+    assert.equal(call.options.cwd, f.checkout); assert.ok(call.options.timeout! <= request.timeoutMs);
+    assert.equal(env.COREPACK_HOME, cache);
+    assert.equal(env.COREPACK_ENABLE_AUTO_PIN, "0"); assert.equal(env.COREPACK_DEFAULT_TO_LATEST, "0");
+    assert.equal(env.COREPACK_ENABLE_PROJECT_SPEC, "0"); assert.equal(env.COREPACK_ENV_FILE, "0");
+    assert.equal(env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0"); assert.equal(env.COREPACK_ENABLE_UNSAFE_CUSTOM_URLS, "0");
+    assert.equal(env.COREPACK_INTEGRITY_KEYS, undefined);
+  }
+  assert.ok(wrapped[1]!.options.timeout! <= wrapped[0]!.options.timeout!);
+  assert.equal(installs(runner.calls).length, 1);
+  assert.equal(runner.calls.filter(call => call.binary === "pnpm").length, 1);
+  await assert.rejects(lstat(cache), /ENOENT/);
+  for (const [name, content] of Object.entries(files)) assert.equal(await readFile(join(f.checkout, name), "utf8"), content);
+  assert.match(await readFile(request.logPath, "utf8"), /Selecting pnpm@12.8.1.*global pnpm is unchanged/);
+});
+test("missing pnpm or an unhydrated shim can use Corepack, but unpinned pnpm never downloads", async t => {
+  for (const reason of ["spawn pnpm ENOENT", "Corepack network access disabled and no cached default"]) {
+    const f = await fixture(t, packageFiles("pnpm", { packageManager: "pnpm@12.8.1" }));
+    const runner = fake({}, call => { if (call.binary === "pnpm") throw new Error(reason); });
+    await runner.installer.prepare(f.request());
+    assert.equal(installs(runner.calls)[0]!.binary, "corepack");
+    await f.put("package.json", "{}");
+    const unpinned = fake({}, call => { if (call.binary === "pnpm") throw new Error(reason); });
+    await assert.rejects(unpinned.installer.prepare(f.request()));
+    assert.ok(!unpinned.calls.some(call => call.binary === "corepack"));
+  }
+});
+test("Corepack selection failures preserve diagnostics, clean the cache, and never install with the wrong pnpm", async t => {
+  for (const reason of ["spawn corepack ENOENT", "404 pinned release unavailable", "Signature does not match", "registry access denied"]) {
+    const f = await fixture(t, packageFiles("pnpm", { packageManager: "pnpm@12.8.1" })), request = f.request();
+    const runner = fake({}, call => {
+      if (call.binary === "corepack") throw new WorkflowError(reason, false, `${reason}\nhttps://user:SECRET@registry.test/?token=SECRET`);
+    });
+    await assert.rejects(runner.installer.prepare(request), error => {
+      assert.match(String(error), /Corepack is installed and up to date/);
+      assert.ok(detailsOf(error).includes(reason)); assert.doesNotMatch(detailsOf(error), /SECRET/); return true;
+    });
+    assert.equal(installs(runner.calls).length, 0);
+    const cache = runner.calls.find(call => call.binary === "corepack")!.options.env!.COREPACK_HOME!;
+    await assert.rejects(lstat(cache), /ENOENT/);
+    assert.ok((await readFile(request.logPath, "utf8")).includes(reason));
+  }
+  const f = await fixture(t, packageFiles("pnpm", { packageManager: "pnpm@12.8.1" })), runner = fake({ corepackPnpm: "12.8.0" });
+  await assert.rejects(runner.installer.prepare(f.request()), /requires pnpm@12.8.1.*selected pnpm is 12.8.0/);
+  assert.equal(installs(runner.calls).length, 0);
+  await assert.rejects(lstat(runner.calls.find(call => call.binary === "corepack")!.options.env!.COREPACK_HOME!), /ENOENT/);
+});
+test("pnpm tags, ranges, URLs, invalid integrity and incompatible runtime/manager declarations fail before Corepack", async t => {
+  for (const pkg of [
+    ...["pnpm@latest", "pnpm@^12.8.1", "pnpm@https://example.test/pnpm.tgz", "pnpm@12.8.1+sha512.invalid", `pnpm@12.8.1+extra+sha512.${"a".repeat(128)}`].map(packageManager => ({ packageManager })),
+    { packageManager: "pnpm@12.8.1", engines: { node: ">=30" } },
+    { packageManager: "pnpm@12.8.1", engines: { pnpm: "<12" } },
+    { packageManager: "pnpm@12.8.1", pnpm: { executionEnv: { nodeVersion: "18.0.0" } } },
+  ]) {
+    const f = await fixture(t, packageFiles("pnpm", pkg)), runner = fake();
+    await assert.rejects(runner.installer.prepare(f.request()));
+    assert.ok(!runner.calls.some(call => call.binary === "corepack")); assert.equal(installs(runner.calls).length, 0);
+  }
+});
+test("pinned pnpm selection and install share the abort signal/deadline and clean caches on failures", async t => {
+  for (const stage of ["direct-abort", "download-abort", "download-deadline", "install-failure"]) {
+    const f = await fixture(t, packageFiles("pnpm", { packageManager: "pnpm@12.8.1" })), controller = new AbortController();
+    const runner = fake({}, async call => {
+      assert.equal(call.options.signal, controller.signal);
+      if (stage === "direct-abort" && call.binary === "pnpm" || stage === "download-abort" && call.binary === "corepack") controller.abort();
+      if (stage === "download-deadline" && call.binary === "corepack") await delay(call.options.timeout! + 10);
+      if (stage === "install-failure" && call.args[1] === "install") throw new Error("dependency install failed");
+    });
+    await assert.rejects(runner.installer.prepare(f.request({ timeoutMs: stage === "download-deadline" ? 500 : 10_000, signal: controller.signal })), /aborted|timed out|dependency install failed/);
+    const wrapped = runner.calls.filter(call => call.binary === "corepack");
+    if (stage === "direct-abort") assert.equal(wrapped.length, 0);
+    else {
+      assert.equal(wrapped.length, stage === "install-failure" ? 2 : 1);
+      await assert.rejects(lstat(wrapped[0]!.options.env!.COREPACK_HOME!), /ENOENT/);
+    }
+    assert.equal(installs(runner.calls).length, stage === "install-failure" ? 1 : 0);
+  }
 });
 for (const [lock, version, args] of [["# yarn lockfile v1\n", "1.22.22", ["install", "--frozen-lockfile", "--production=false"]], ["__metadata:\n  version: 8\n", "4.6.0", ["install", "--immutable"]]] as const) {
   test(`Yarn ${version} gets generation-specific immutable/dev settings including probes`, async t => {
@@ -135,7 +232,7 @@ test("manager pin/range mismatches and missing node fail without installation/do
     await assert.rejects(runner.installer.prepare(f.request()), /requires|exact/); assert.equal(installs(runner.calls).length, 0);
   }
   const f = await fixture(t, packageFiles()), runner = fake({}, call => { if (call.binary === "node") throw new Error("ENOENT"); });
-  await assert.rejects(runner.installer.prepare(f.request()), /never bootstraps/);
+  await assert.rejects(runner.installer.prepare(f.request()), /must already be installed/);
   assert.equal(runner.calls.length, 1);
 });
 test("lockfile selection rejects conflicts, mixed ecosystems, and unpinned manifests; overrides select only one", async t => {
@@ -412,13 +509,13 @@ test("pnpm runtime-management declarations fail before probes; workspace PM mana
     const f = await fixture(t, { ...packageFiles("pnpm"), ...extra }), runner = fake();
     await assert.rejects(runner.installer.prepare(f.request()), /runtime-management/); assert.equal(runner.calls.length, 0);
   }
-  const f = await fixture(t, { ...packageFiles("pnpm"), "pnpm-workspace.yaml": "managePackageManagerVersions: true\nmodulesDir: /outside\nvirtualStoreDir: /outside\n" }), runner = fake();
+  const f = await fixture(t, { ...packageFiles("pnpm"), "pnpm-workspace.yaml": "managePackageManagerVersions: true\npmOnFail: download\nmodulesDir: /outside\nvirtualStoreDir: /outside\n" }), runner = fake();
   environment(t, { npm_config_modules_dir: "/shared", npm_config_virtual_store_dir: "/shared", npm_config_use_node_version: "18.0.0" });
   await runner.installer.prepare(f.request());
   const pnpmCalls = runner.calls.filter(call => call.binary === "pnpm");
   assert.deepEqual(pnpmCalls.map(call => call.args[0]), ["--version", "install"]);
   for (const call of pnpmCalls) {
-    assert.ok(call.args.includes("--config.manage-package-manager-versions=false")); assert.ok(call.args.includes("--config.use-node-version="));
+    assert.ok(call.args.includes("--config.manage-package-manager-versions=false")); assert.ok(call.args.includes("--config.pm-on-fail=ignore")); assert.ok(call.args.includes("--config.use-node-version="));
     assert.ok(!call.args.includes("--manage-package-manager-versions=false")); assert.ok(!call.args.includes("--use-node-version="));
     assert.ok(call.args.includes("--modules-dir=node_modules")); assert.ok(call.args.includes("--virtual-store-dir=node_modules/.pnpm"));
     assert.ok(call.args.includes(`--lockfile-dir=${f.checkout}`));

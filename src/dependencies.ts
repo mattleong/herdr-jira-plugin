@@ -90,6 +90,7 @@ export class DependenciesInstaller {
     const log = await open(request.logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     let written = 0, truncated = false, failureOutput = "";
     let failureFooter: Buffer | undefined;
+    let managerCache: string | undefined;
     const append = async (text: string): Promise<void> => {
       const room = maxLog - footerBudget - written;
       if (room <= 0) { if (text) truncated = true; return; }
@@ -170,11 +171,22 @@ export class DependenciesInstaller {
         }
       }
       const env: NodeJS.ProcessEnv = { ...process.env };
+      let pinnedPnpm: { spec: string; env: NodeJS.ProcessEnv } | undefined;
       const command = async (binary: string, args: string[], label: string, environment = env): Promise<string> => {
-        // CLI configuration outranks pnpm-workspace.yaml; env-only guards do not.
-        // The config. prefix also keeps these guards valid for pnpm's install parser.
-        if (binary === "pnpm") args = [...args, "--config.manage-package-manager-versions=false", "--config.use-node-version=", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm", `--lockfile-dir=${root}`];
+        // Apply guards to the logical manager before wrapping it with Corepack.
+        // CLI configuration outranks pnpm-workspace.yaml; the config. prefix
+        // also keeps these guards valid for pnpm's install parser.
+        if (binary === "pnpm") {
+          // pnpm 11+ replaced manage-package-manager-versions with pm-on-fail.
+          args = [...args, "--config.manage-package-manager-versions=false", "--config.pm-on-fail=ignore", "--config.use-node-version=", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm", `--lockfile-dir=${root}`];
+          if (pinnedPnpm) {
+            binary = "corepack";
+            args = [pinnedPnpm.spec, ...args];
+            environment = pinnedPnpm.env;
+          }
+        }
         remaining();
+        failureOutput = "";
         request.progress?.(label);
         await append(`\n$ ${binary} ${args.join(" ")}\n`);
         const output = { stdout: "", stderr: "" }, sizes = { stdout: 0, stderr: 0 }, omitted = { stdout: false, stderr: false };
@@ -210,7 +222,10 @@ export class DependenciesInstaller {
           if (completeRecords(output.stdout) !== output.stdout || completeRecords(output.stderr) !== output.stderr) truncated = true;
           failureOutput = captured(false);
           await append(failureOutput);
-          const summary = `${label} failed: ${safeText(error instanceof Error ? error.message : String(error))} Install required tools/runtimes yourself; setup never bootstraps them.`;
+          const guidance = binary === "corepack" && pinnedPnpm
+            ? `Could not run pinned ${pinnedPnpm.spec}. Check that Corepack is installed and up to date, the pinned release exists, and registry access/signature verification succeeds; global pnpm was not changed.`
+            : "Required tools/runtimes must already be installed (except exact pinned pnpm, fetched through installed Corepack).";
+          const summary = `${label} failed: ${safeText(error instanceof Error ? error.message : String(error))} ${guidance}`;
           throw new WorkflowError(summary, false, `${summary}\n\n${detailsOf(error)}`);
         }
       };
@@ -224,13 +239,20 @@ export class DependenciesInstaller {
         const js = manager as typeof jsManagers[number];
         if (!pkg) fail(`${js} requires package.json at the selected setup directory.`);
         if (!availableLocks.has(js)) fail(`${js} requires a matching committed lockfile; setup will not generate one.`);
-        let pin: string | undefined;
+        let pin: string | undefined, pnpmSpec: string | undefined;
         if (pkg.packageManager !== undefined) {
           if (typeof pkg.packageManager !== "string") fail("packageManager must be an exact manager@version pin.");
           const match = pkg.packageManager.match(/^(npm|pnpm|yarn|bun)@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+[^\s]+)?$/);
           if (!match || !semver.valid(match[2])) fail("packageManager must be an exact supported manager@version pin (ranges/tags cannot trigger downloads).");
           if (match[1] !== js && !explicit) fail(`packageManager selects ${match[1]} but its matching lockfile is absent or conflicting.`);
-          if (match[1] === js) pin = match[2];
+          if (match[1] === js) {
+            pin = match[2];
+            if (js === "pnpm") {
+              const integrity = pkg.packageManager.slice(`pnpm@${pin}`.length);
+              if (integrity && !/^\+(?:sha224\.[a-fA-F0-9]{56}|sha256\.[a-fA-F0-9]{64}|sha384\.[a-fA-F0-9]{96}|sha512\.[a-fA-F0-9]{128})$/.test(integrity)) fail("pnpm packageManager integrity must be a supported SHA hash in hexadecimal.");
+              pnpmSpec = `pnpm@${pin}${integrity.toLowerCase()}`;
+            }
+          }
         }
         const localDestination = async (name: string): Promise<string> => {
           let path = root;
@@ -253,7 +275,7 @@ export class DependenciesInstaller {
         for (const key of Object.keys(env)) if (/^(?:npm_config_(?:omit|only|production|prefix|global|workspace|workspaces|userconfig|location|dry_run|package_lock_only|lockfile_only|manage_package_manager_versions|use_node_version)|yarn_(?:production|ignore_path|yarn_path|rc_filename)|node_options)$/i.test(key)) delete env[key];
         Object.assign(env, {
           NODE_ENV: "development", npm_config_production: "false", npm_config_omit: "", npm_config_only: "", npm_config_include: "dev", npm_config_prefix: root, npm_config_global: "false", npm_config_dry_run: "false", npm_config_package_lock_only: "false",
-          COREPACK_ENABLE_NETWORK: "0", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_AUTO_PIN: "0", COREPACK_ENABLE_PROJECT_SPEC: "0", COREPACK_ENABLE_STRICT: "0",
+          COREPACK_ENABLE_NETWORK: "0", COREPACK_DEFAULT_TO_LATEST: "0", COREPACK_ENABLE_AUTO_PIN: "0", COREPACK_ENABLE_PROJECT_SPEC: "0", COREPACK_ENABLE_STRICT: "0", COREPACK_ENV_FILE: "0",
           npm_config_manage_package_manager_versions: "false", npm_config_use_node_version: "", npm_config_package_manager_strict: "false", YARN_IGNORE_PATH: "true",
         });
         let classicYarn = false;
@@ -277,8 +299,29 @@ export class DependenciesInstaller {
           if (nvm !== undefined) checkRange(node, numericVersion(nvm, ".nvmrc"), ".nvmrc");
           if (nodeFile !== undefined) checkRange(node, numericVersion(nodeFile, ".node-version"), ".node-version");
         }
-        const version = await toolVersion(js);
-        if (pin && !semver.eq(version, pin)) fail(`packageManager requires ${js}@${pin}, but installed ${js} is ${version}. Install/select that version yourself; setup will not download it.`);
+        let version: string | undefined;
+        try { version = await toolVersion(js); }
+        catch (error) {
+          // A missing binary or an unhydrated Corepack shim can fail this read-only
+          // probe. Only pinned pnpm can recover; never retry an actual install.
+          remaining();
+          if (!pnpmSpec) throw error;
+          await append("Installed pnpm could not be probed; selecting the exact project pin through Corepack.\n");
+        }
+        if (pnpmSpec && pin && (version === undefined || !semver.eq(version, pin))) {
+          checkRange(pin, at(pkg, "engines", js), `engines.${js}`);
+          managerCache = await mkdtemp(join(tmpdir(), "herdr-pnpm-"));
+          pinnedPnpm = { spec: pnpmSpec, env: {
+            ...env, COREPACK_HOME: managerCache, COREPACK_ENABLE_NETWORK: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", COREPACK_ENABLE_UNSAFE_CUSTOM_URLS: "0",
+          } };
+          // Never inherit a request to bypass download signature verification.
+          delete pinnedPnpm.env.COREPACK_INTEGRITY_KEYS;
+          await append(`Selecting ${pnpmSpec} in a temporary Corepack cache; global pnpm is unchanged.\n`);
+          version = await toolVersion(js);
+          pinnedPnpm.env.COREPACK_ENABLE_NETWORK = "0"; // The install must reuse the verified, cached manager.
+        }
+        if (!version) fail(`Could not determine installed ${js} version.`);
+        if (pin && !semver.eq(version, pin)) fail(`packageManager requires ${js}@${pin}, but selected ${js} is ${version}. Install/select that version yourself; setup will not use a mismatched version.`);
         checkRange(version, at(pkg, "engines", js), `engines.${js}`);
         let args: string[];
         if (js === "npm") args = ["ci", "--include=dev", "--prefix", root, "--global=false"];
@@ -497,7 +540,10 @@ export class DependenciesInstaller {
       try {
         if (truncated) await log.write(truncation);
         if (failureFooter) await log.write(utf8Prefix(failureFooter, footerBudget - Buffer.byteLength(truncation)));
-      } finally { await log.close(); }
+      } finally {
+        try { await log.close(); }
+        finally { if (managerCache) await rm(managerCache, { recursive: true, force: true }); }
+      }
     }
   }
 }
